@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import math
 import sys
@@ -333,6 +334,27 @@ def build_scenarios() -> list[Scenario]:
     return [Scenario(name=name, target=target) for name, target in SCENARIOS]
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run a headless smoke test against controller_alex.py."
+    )
+    wind_group = parser.add_mutually_exclusive_group()
+    wind_group.add_argument(
+        "--wind",
+        dest="wind_enabled",
+        action="store_true",
+        help="Enable the configured wind preset for this run.",
+    )
+    wind_group.add_argument(
+        "--no-wind",
+        dest="wind_enabled",
+        action="store_false",
+        help="Disable wind for this run.",
+    )
+    parser.set_defaults(wind_enabled=ENABLE_WIND)
+    return parser.parse_args()
+
+
 def run_scenario(
     sim: HeadlessSmokeSimulator,
     scenario: Scenario,
@@ -476,11 +498,11 @@ def format_optional(value: float | None, unit: str = "") -> str:
     return f"{value:.3f}{unit}"
 
 
-def print_report(results: list[ScenarioResult]):
+def print_report(results: list[ScenarioResult], wind_enabled: bool):
     aggregate = aggregate_results(results)
 
     print(f"Controller: {CONTROLLER_PATH.name}")
-    print(f"Wind enabled: {ENABLE_WIND}")
+    print(f"Wind enabled: {wind_enabled}")
     print(
         "Settings: "
         f"sim_dt={SIM_TIMESTEP:.4f}s "
@@ -548,9 +570,13 @@ def main():
     if not CONTROLLER_PATH.exists():
         raise FileNotFoundError(f"Controller file not found: {CONTROLLER_PATH}")
 
+    args = parse_args()
     controller_module = load_controller_module(CONTROLLER_PATH)
     scenarios = build_scenarios()
-    simulator = HeadlessSmokeSimulator(controller_module, wind_enabled=ENABLE_WIND)
+    simulator = HeadlessSmokeSimulator(
+        controller_module,
+        wind_enabled=args.wind_enabled,
+    )
 
     try:
         simulator.reset_vehicle()
@@ -558,7 +584,7 @@ def main():
     finally:
         simulator.disconnect()
 
-    print_report(results)
+    print_report(results, wind_enabled=args.wind_enabled)
 
 
 if __name__ == "__main__":
