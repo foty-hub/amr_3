@@ -7,6 +7,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pybullet as p
 import pybullet_data
@@ -18,12 +19,11 @@ if str(THIS_DIR) not in sys.path:
 from src.tello_controller import TelloController
 from src.wind import Wind
 
-
 CONTROLLER_PATH = THIS_DIR / "controller_alex.py"
 
 SIM_TIMESTEP = 1.0 / 1000.0
 POS_CONTROL_TIMESTEP = 1.0 / 50.0
-SCENARIO_TIMEOUT_SECONDS = 4.0
+SCENARIO_TIMEOUT_SECONDS = 10.0
 
 SETTLE_POSITION_THRESHOLD_M = 0.08
 SETTLE_YAW_THRESHOLD_RAD = 0.12
@@ -68,6 +68,8 @@ class Observation:
 class ScenarioResult:
     name: str
     target: tuple[float, float, float, float]
+    start_time_s: float
+    end_time_s: float
     duration_s: float
     settled: bool
     settling_time_s: float | None
@@ -80,8 +82,14 @@ class ScenarioResult:
     peak_position_overshoot_m: float
     peak_yaw_overshoot_rad: float
     sample_count: int
+    time_trace_s: np.ndarray
+    position_trace: np.ndarray
+    x_error_trace: np.ndarray
+    y_error_trace: np.ndarray
+    z_error_trace: np.ndarray
     position_error_trace: np.ndarray
-    yaw_error_trace: np.ndarray
+    yaw_signed_error_trace: np.ndarray
+    yaw_abs_error_trace: np.ndarray
 
 
 def wrap_angle(angle: float) -> float:
@@ -289,7 +297,9 @@ class HeadlessSmokeSimulator:
         try:
             values = list(unchecked_action)
         except TypeError as exc:
-            raise TypeError("Controller output must be an iterable of length 4 or 5") from exc
+            raise TypeError(
+                "Controller output must be an iterable of length 4 or 5"
+            ) from exc
 
         if len(values) not in (4, 5):
             raise ValueError("Controller output must have length 4 or 5")
@@ -315,13 +325,16 @@ def compute_position_overshoot(
 
     overshoot = np.zeros(3)
     overshoot[active_axes] = np.maximum(
-        (current_pos[active_axes] - target_pos[active_axes]) * np.sign(delta[active_axes]),
+        (current_pos[active_axes] - target_pos[active_axes])
+        * np.sign(delta[active_axes]),
         0.0,
     )
     return float(np.linalg.norm(overshoot))
 
 
-def compute_yaw_overshoot(start_yaw: float, target_yaw: float, current_yaw: float) -> float:
+def compute_yaw_overshoot(
+    start_yaw: float, target_yaw: float, current_yaw: float
+) -> float:
     delta = yaw_error(target_yaw, start_yaw)
     if abs(delta) <= 1e-6:
         return 0.0
@@ -368,8 +381,13 @@ def run_scenario(
     target_yaw = float(scenario.target[3])
 
     timestamps = []
+    positions = []
+    x_errors = []
+    y_errors = []
+    z_errors = []
     position_errors = []
-    yaw_errors = []
+    yaw_signed_errors = []
+    yaw_abs_errors = []
 
     peak_position_overshoot = 0.0
     peak_yaw_overshoot = 0.0
@@ -381,12 +399,19 @@ def run_scenario(
         obs = sim.step(scenario.target)
         elapsed_s = sim.sim_time - scenario_start_s
 
-        position_error = float(np.linalg.norm(target_pos - obs.pos))
-        current_yaw_error = abs(yaw_error(target_yaw, obs.euler[2]))
+        position_delta = target_pos - obs.pos
+        signed_yaw_error = yaw_error(target_yaw, obs.euler[2])
+        position_error = float(np.linalg.norm(position_delta))
+        current_yaw_error = abs(signed_yaw_error)
 
-        timestamps.append(elapsed_s)
+        timestamps.append(sim.sim_time)
+        positions.append(obs.pos.copy())
+        x_errors.append(position_delta[0])
+        y_errors.append(position_delta[1])
+        z_errors.append(position_delta[2])
         position_errors.append(position_error)
-        yaw_errors.append(current_yaw_error)
+        yaw_signed_errors.append(signed_yaw_error)
+        yaw_abs_errors.append(current_yaw_error)
 
         peak_position_overshoot = max(
             peak_position_overshoot,
@@ -400,36 +425,41 @@ def run_scenario(
         within_position = position_error <= SETTLE_POSITION_THRESHOLD_M
         within_yaw = current_yaw_error <= SETTLE_YAW_THRESHOLD_RAD
 
-        if within_position and within_yaw:
-            if settling_window_start is None:
-                settling_window_start = elapsed_s
-            elif elapsed_s - settling_window_start >= SETTLE_HOLD_SECONDS:
-                settling_time_s = settling_window_start
-                break
-        else:
-            settling_window_start = None
+        # Keep sampling until the scenario timeout so each target gets the same
+        # dwell time, but remember the first time the controller settles.
+        if settling_time_s is None:
+            if within_position and within_yaw:
+                if settling_window_start is None:
+                    settling_window_start = elapsed_s
+                elif elapsed_s - settling_window_start >= SETTLE_HOLD_SECONDS:
+                    settling_time_s = settling_window_start
+            else:
+                settling_window_start = None
 
     position_error_trace = np.array(position_errors)
-    yaw_error_trace = np.array(yaw_errors)
+    yaw_abs_error_trace = np.array(yaw_abs_errors)
 
     if position_error_trace.size == 0:
         raise RuntimeError(f"Scenario {scenario.name} produced no simulation samples")
 
-    duration_s = float(timestamps[-1])
-    window_start_s = max(0.0, duration_s - METRIC_WINDOW_SECONDS)
-    window_mask = np.array(timestamps) >= window_start_s
+    duration_s = float(timestamps[-1] - scenario_start_s)
+    window_start_s = max(scenario_start_s, timestamps[-1] - METRIC_WINDOW_SECONDS)
+    time_trace_s = np.array(timestamps)
+    window_mask = time_trace_s >= window_start_s
 
     window_position_errors = position_error_trace[window_mask]
-    window_yaw_errors = yaw_error_trace[window_mask]
+    window_yaw_errors = yaw_abs_error_trace[window_mask]
 
     return ScenarioResult(
         name=scenario.name,
         target=scenario.target,
+        start_time_s=scenario_start_s,
+        end_time_s=float(timestamps[-1]),
         duration_s=duration_s,
         settled=settling_time_s is not None,
         settling_time_s=settling_time_s,
         final_position_error_m=float(position_error_trace[-1]),
-        final_yaw_error_rad=float(yaw_error_trace[-1]),
+        final_yaw_error_rad=float(yaw_abs_error_trace[-1]),
         mean_position_error_m=float(np.mean(window_position_errors)),
         mean_yaw_error_rad=float(np.mean(window_yaw_errors)),
         position_error_variance_m2=float(np.var(window_position_errors)),
@@ -437,8 +467,14 @@ def run_scenario(
         peak_position_overshoot_m=peak_position_overshoot,
         peak_yaw_overshoot_rad=peak_yaw_overshoot,
         sample_count=int(position_error_trace.size),
+        time_trace_s=time_trace_s,
+        position_trace=np.vstack(positions),
+        x_error_trace=np.array(x_errors),
+        y_error_trace=np.array(y_errors),
+        z_error_trace=np.array(z_errors),
         position_error_trace=position_error_trace,
-        yaw_error_trace=yaw_error_trace,
+        yaw_signed_error_trace=np.array(yaw_signed_errors),
+        yaw_abs_error_trace=yaw_abs_error_trace,
     )
 
 
@@ -478,8 +514,10 @@ def aggregate_results(results: list[ScenarioResult]) -> dict[str, float]:
         float(np.mean(settled_times)) if settled_times else float("nan")
     )
 
-    all_position_errors = np.concatenate([result.position_error_trace for result in results])
-    all_yaw_errors = np.concatenate([result.yaw_error_trace for result in results])
+    all_position_errors = np.concatenate(
+        [result.position_error_trace for result in results]
+    )
+    all_yaw_errors = np.concatenate([result.yaw_abs_error_trace for result in results])
 
     per_pose_metrics["all_sample_mean_position_error_m"] = float(
         np.mean(all_position_errors)
@@ -488,7 +526,9 @@ def aggregate_results(results: list[ScenarioResult]) -> dict[str, float]:
     per_pose_metrics["all_sample_position_error_variance_m2"] = float(
         np.var(all_position_errors)
     )
-    per_pose_metrics["all_sample_yaw_error_variance_rad2"] = float(np.var(all_yaw_errors))
+    per_pose_metrics["all_sample_yaw_error_variance_rad2"] = float(
+        np.var(all_yaw_errors)
+    )
     return per_pose_metrics
 
 
@@ -496,6 +536,161 @@ def format_optional(value: float | None, unit: str = "") -> str:
     if value is None or math.isnan(value):
         return "n/a"
     return f"{value:.3f}{unit}"
+
+
+def add_time_annotations(ax, results: list[ScenarioResult], show_labels: bool = False):
+    for result in results[1:]:
+        ax.axvline(
+            result.start_time_s,
+            color="0.55",
+            linewidth=1.0,
+            alpha=0.7,
+            zorder=0,
+        )
+
+    for result in results:
+        if result.settling_time_s is None:
+            continue
+        ax.axvline(
+            result.start_time_s + result.settling_time_s,
+            color="0.35",
+            linewidth=1.0,
+            linestyle="--",
+            alpha=0.35,
+            zorder=0,
+        )
+
+    if show_labels:
+        for result in results:
+            midpoint = (
+                result.start_time_s + (result.end_time_s - result.start_time_s) / 2.0
+            )
+            ax.text(
+                midpoint,
+                1.02,
+                result.name,
+                transform=ax.get_xaxis_transform(),
+                ha="center",
+                va="bottom",
+                fontsize=8,
+                color="0.25",
+            )
+
+
+def plot_results(results: list[ScenarioResult], wind_enabled: bool):
+    fig = plt.figure(figsize=(16, 9), constrained_layout=True)
+    grid = fig.add_gridspec(2, 3)
+
+    ax_x = fig.add_subplot(grid[0, 0])
+    ax_y = fig.add_subplot(grid[0, 1], sharex=ax_x)
+    ax_z = fig.add_subplot(grid[0, 2], sharex=ax_x)
+    ax_yaw = fig.add_subplot(grid[1, 0], sharex=ax_x)
+    ax_pos_norm = fig.add_subplot(grid[1, 1], sharex=ax_x)
+    ax_xy = fig.add_subplot(grid[1, 2])
+
+    series_axes = (
+        (ax_x, "X Error", "x_error_trace", "m"),
+        (ax_y, "Y Error", "y_error_trace", "m"),
+        (ax_z, "Z Error", "z_error_trace", "m"),
+        (ax_yaw, "Yaw Error", "yaw_signed_error_trace", "rad"),
+        (ax_pos_norm, "Position Error Norm", "position_error_trace", "m"),
+    )
+
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(results), 1)))
+
+    for axis, title, _, unit in series_axes:
+        axis.set_title(title)
+        axis.set_ylabel(unit)
+        axis.grid(alpha=0.25)
+
+    for axis in (ax_x, ax_y, ax_z, ax_yaw):
+        axis.axhline(0.0, color="0.75", linewidth=0.9, zorder=0)
+
+    ax_yaw.axhline(
+        SETTLE_YAW_THRESHOLD_RAD,
+        color="0.45",
+        linewidth=1.0,
+        linestyle=":",
+        alpha=0.8,
+    )
+    ax_yaw.axhline(
+        -SETTLE_YAW_THRESHOLD_RAD,
+        color="0.45",
+        linewidth=1.0,
+        linestyle=":",
+        alpha=0.8,
+    )
+    ax_pos_norm.axhline(
+        SETTLE_POSITION_THRESHOLD_M,
+        color="0.45",
+        linewidth=1.0,
+        linestyle=":",
+        alpha=0.8,
+    )
+
+    for color, result in zip(colors, results):
+        for axis, _, attribute_name, _ in series_axes:
+            axis.plot(
+                result.time_trace_s,
+                getattr(result, attribute_name),
+                color=color,
+                linewidth=1.4,
+            )
+
+        ax_xy.plot(
+            result.position_trace[:, 0],
+            result.position_trace[:, 1],
+            color=color,
+            linewidth=1.6,
+        )
+        ax_xy.scatter(
+            result.target[0],
+            result.target[1],
+            color=color,
+            marker="x",
+            s=60,
+        )
+        ax_xy.annotate(
+            result.name,
+            (result.target[0], result.target[1]),
+            xytext=(5, 5),
+            textcoords="offset points",
+            fontsize=8,
+            color=color,
+        )
+
+    initial_pos = results[0].position_trace[0]
+    ax_xy.scatter(
+        initial_pos[0],
+        initial_pos[1],
+        color="0.1",
+        marker="o",
+        s=35,
+        label="start",
+    )
+    ax_xy.set_title("XY Trajectory")
+    ax_xy.set_xlabel("x (m)")
+    ax_xy.set_ylabel("y (m)")
+    ax_xy.grid(alpha=0.25)
+    ax_xy.axis("equal")
+
+    for axis in (ax_x, ax_y, ax_z, ax_yaw, ax_pos_norm):
+        add_time_annotations(axis, results, show_labels=axis is ax_pos_norm)
+        axis.set_xlim(results[0].start_time_s, results[-1].end_time_s)
+
+    ax_yaw.set_xlabel("time (s)")
+    ax_pos_norm.set_xlabel("time (s)")
+
+    fig.suptitle(
+        f"Controller Smoke Test: {CONTROLLER_PATH.name} | wind={'on' if wind_enabled else 'off'}",
+        fontsize=14,
+    )
+
+    if "agg" in plt.get_backend().lower():
+        fig.canvas.draw()
+        return
+
+    plt.show()
 
 
 def print_report(results: list[ScenarioResult], wind_enabled: bool):
@@ -585,6 +780,7 @@ def main():
         simulator.disconnect()
 
     print_report(results, wind_enabled=args.wind_enabled)
+    plot_results(results, wind_enabled=args.wind_enabled)
 
 
 if __name__ == "__main__":
