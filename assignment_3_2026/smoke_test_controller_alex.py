@@ -20,7 +20,11 @@ if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
 
-CONTROLLER_PATHS = {"mpc": "controller_mpc", "pid": "controller_pid"}
+CONTROLLER_PATHS = {
+    "mpc": "controller_alex_mpc",
+    "pid": "controller_pid",
+    "lqr": "controller_ben",
+}
 DEFAULT_CONTROLLER = "pid"
 
 SIM_TIMESTEP = 1.0 / 1000.0

@@ -1,6 +1,7 @@
 # wind_flag = False
 # Implement a controller
 import numpy as np
+import qpsolvers
 
 
 class MPCController:

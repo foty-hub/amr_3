@@ -8,4 +8,5 @@ dependencies = [
     "matplotlib>=3.10.8",
     "numpy>=2.4.3",
     "pybullet>=3.2.7",
+    "qpsolvers[open-source-solvers]>=4.11.0",
 ]
