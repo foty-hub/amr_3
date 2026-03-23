@@ -12,14 +12,16 @@ import numpy as np
 import pybullet as p
 import pybullet_data
 
+from src.tello_controller import TelloController
+from src.wind import Wind
+
 THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
-from src.tello_controller import TelloController
-from src.wind import Wind
 
-CONTROLLER_PATH = THIS_DIR / "controller_alex.py"
+CONTROLLER_PATHS = {"mpc": "controller_mpc", "pid": "controller_pid"}
+DEFAULT_CONTROLLER = "pid"
 
 SIM_TIMESTEP = 1.0 / 1000.0
 POS_CONTROL_TIMESTEP = 1.0 / 50.0
@@ -98,6 +100,24 @@ def wrap_angle(angle: float) -> float:
 
 def yaw_error(target_yaw: float, current_yaw: float) -> float:
     return wrap_angle(target_yaw - current_yaw)
+
+
+def normalize_controller_name(raw_value: str) -> str:
+    controller_name = raw_value.strip()
+    if controller_name.startswith("controller="):
+        controller_name = controller_name.split("=", maxsplit=1)[1]
+
+    controller_name = controller_name.strip().lower()
+    if controller_name not in CONTROLLER_PATHS:
+        available = ", ".join(sorted(CONTROLLER_PATHS))
+        raise argparse.ArgumentTypeError(
+            f"Unknown controller '{controller_name}'. Choose one of: {available}"
+        )
+    return controller_name
+
+
+def resolve_controller_path(controller_name: str) -> Path:
+    return THIS_DIR / f"{CONTROLLER_PATHS[controller_name]}.py"
 
 
 def load_controller_module(controller_path: Path):
@@ -349,7 +369,19 @@ def build_scenarios() -> list[Scenario]:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run a headless smoke test against controller_alex.py."
+        description="Run a headless smoke test against one of the configured controllers."
+    )
+    parser.add_argument(
+        "--controller",
+        dest="controller_name",
+        type=normalize_controller_name,
+        help="Controller key from CONTROLLER_PATHS, for example '--controller pid'.",
+    )
+    parser.add_argument(
+        "controller_selector",
+        nargs="?",
+        type=normalize_controller_name,
+        help="Optional shorthand controller selector, for example 'controller=pid' or 'pid'.",
     )
     wind_group = parser.add_mutually_exclusive_group()
     wind_group.add_argument(
@@ -365,7 +397,22 @@ def parse_args():
         help="Disable wind for this run.",
     )
     parser.set_defaults(wind_enabled=ENABLE_WIND)
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if (
+        args.controller_name is not None
+        and args.controller_selector is not None
+        and args.controller_name != args.controller_selector
+    ):
+        parser.error(
+            "Conflicting controller selections provided via '--controller' and the positional selector."
+        )
+
+    args.controller_name = (
+        args.controller_name or args.controller_selector or DEFAULT_CONTROLLER
+    )
+    args.controller_path = resolve_controller_path(args.controller_name)
+    return args
 
 
 def run_scenario(
@@ -577,7 +624,11 @@ def add_time_annotations(ax, results: list[ScenarioResult], show_labels: bool = 
             )
 
 
-def plot_results(results: list[ScenarioResult], wind_enabled: bool):
+def plot_results(
+    results: list[ScenarioResult],
+    wind_enabled: bool,
+    controller_path: Path,
+):
     fig = plt.figure(figsize=(16, 9), constrained_layout=True)
     grid = fig.add_gridspec(2, 3)
 
@@ -682,7 +733,7 @@ def plot_results(results: list[ScenarioResult], wind_enabled: bool):
     ax_pos_norm.set_xlabel("time (s)")
 
     fig.suptitle(
-        f"Controller Smoke Test: {CONTROLLER_PATH.name} | wind={'on' if wind_enabled else 'off'}",
+        f"Controller Smoke Test: {controller_path.name} | wind={'on' if wind_enabled else 'off'}",
         fontsize=14,
     )
 
@@ -693,10 +744,14 @@ def plot_results(results: list[ScenarioResult], wind_enabled: bool):
     plt.show()
 
 
-def print_report(results: list[ScenarioResult], wind_enabled: bool):
+def print_report(
+    results: list[ScenarioResult],
+    wind_enabled: bool,
+    controller_path: Path,
+):
     aggregate = aggregate_results(results)
 
-    print(f"Controller: {CONTROLLER_PATH.name}")
+    print(f"Controller: {controller_path.name}")
     print(f"Wind enabled: {wind_enabled}")
     print(
         "Settings: "
@@ -762,11 +817,13 @@ def print_report(results: list[ScenarioResult], wind_enabled: bool):
 
 
 def main():
-    if not CONTROLLER_PATH.exists():
-        raise FileNotFoundError(f"Controller file not found: {CONTROLLER_PATH}")
-
     args = parse_args()
-    controller_module = load_controller_module(CONTROLLER_PATH)
+    if not args.controller_path.exists():
+        raise FileNotFoundError(
+            f"Controller '{args.controller_name}' resolves to missing file: {args.controller_path}"
+        )
+
+    controller_module = load_controller_module(args.controller_path)
     scenarios = build_scenarios()
     simulator = HeadlessSmokeSimulator(
         controller_module,
@@ -779,8 +836,16 @@ def main():
     finally:
         simulator.disconnect()
 
-    print_report(results, wind_enabled=args.wind_enabled)
-    plot_results(results, wind_enabled=args.wind_enabled)
+    print_report(
+        results,
+        wind_enabled=args.wind_enabled,
+        controller_path=args.controller_path,
+    )
+    plot_results(
+        results,
+        wind_enabled=args.wind_enabled,
+        controller_path=args.controller_path,
+    )
 
 
 if __name__ == "__main__":
