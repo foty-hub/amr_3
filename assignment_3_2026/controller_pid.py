@@ -41,8 +41,7 @@ def controller(state, target_pos, dt, wind_enabled=False):
     state = np.delete(state, [3, 4])  # ignore roll/pitch
     control = pid_controller(np.array(state), np.array(target_pos), dt)
 
-    # this output is still in the world frame - convert to robot frame
-    # think we just need to convert cos/sin?
+    # Convert from world frame to robot frame - rotate x,y
     theta = state[3]
     control[0:2] = get_rot_matrix(theta) @ control[0:2]
 
