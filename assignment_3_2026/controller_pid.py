@@ -17,6 +17,8 @@ class PIDController:
 
     def __call__(self, state, target_pos, dt):
         err = target_pos - state
+        # wrap the angular error into [-pi, +pi]
+        err[3] = (err[3] + np.pi) % (2 * np.pi) - np.pi
 
         self.history.append(err * dt)
         derivative = (err - self.prev_err) / dt
