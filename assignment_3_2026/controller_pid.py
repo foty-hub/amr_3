@@ -42,7 +42,10 @@ class PIDController:
             return False
 
         same_position = np.allclose(target_pos[:3], self.last_target[:3], atol=1e-6)
-        same_yaw = abs((target_pos[3] - self.last_target[3] + np.pi) % (2 * np.pi) - np.pi) <= 1e-6
+        same_yaw = (
+            abs((target_pos[3] - self.last_target[3] + np.pi) % (2 * np.pi) - np.pi)
+            <= 1e-6
+        )
         return not (same_position and same_yaw)
 
 
