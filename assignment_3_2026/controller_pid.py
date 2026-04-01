@@ -13,8 +13,8 @@ class PIDController:
         self.last_target = None
 
         self.Kp = np.array([0.25, 0.25, 0.25, 0.2])
-        self.Ki = np.array([0.00, 0.00, 0.00, 0.0])  # no integral
-        self.Kd = np.array([0.00, 0.00, 0.00, 0.0])  # no derivative
+        self.Ki = np.array([0.05, 0.05, 0.00, 0.0])
+        self.Kd = np.array([0.01, 0.01, 0.00, 0.0])
 
     def __call__(self, state, target_pos, dt):
         if self._target_changed(target_pos):

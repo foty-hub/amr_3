@@ -12,7 +12,7 @@ def wrap_angle(angle):
 
 
 class MPCController:
-    def __init__(self, horizon: int = 6):
+    def __init__(self, horizon: int = 5):
         self.horizon = horizon
         self.state_dim = 4
         self.control_dim = 4
@@ -20,13 +20,13 @@ class MPCController:
         self.C = np.eye(self.state_dim)
         self.M = horizon
 
-        self.state_weights = np.array([4.0, 4.0, 5.0, 3.0])
-        self.delta_weights = np.array([3.0, 3.0, 4.0, 1.5])
-        self.control_regularization_weights = np.array([0.08, 0.08, 0.08, 0.04])
+        self.state_weights = np.array([2.0, 2.0, 2.5, 1.5])
+        self.delta_weights = np.array([16.0, 16.0, 20.0, 6.0])
+        self.control_regularization_weights = np.array([0.40, 0.40, 0.45, 0.14])
 
-        yaw_limit = min(0.7, YAW_RATE_LIMIT)
-        self.control_lb = np.array([-0.25, -0.25, -0.25, -yaw_limit])
-        self.control_ub = np.array([0.25, 0.25, 0.25, yaw_limit])
+        yaw_limit = min(0.35, YAW_RATE_LIMIT)
+        self.control_lb = np.array([-0.14, -0.14, -0.14, -yaw_limit])
+        self.control_ub = np.array([0.14, 0.14, 0.14, yaw_limit])
 
         self.Lambda = self._build_lambda()
         self.Q_bar = np.kron(np.eye(self.M), np.diag(self.state_weights))
@@ -39,8 +39,8 @@ class MPCController:
         self.ub = np.tile(self.control_ub, self.M)
 
         self.P = np.eye(self.state_dim)
-        self.Q_kf = np.diag([1e-4, 1e-4, 1e-4, 2e-4])
-        self.R_kf = np.diag([5e-4, 5e-4, 5e-4, 1e-3])
+        self.Q_kf = np.diag([8e-4, 8e-4, 8e-4, 1.6e-3])
+        self.R_kf = np.diag([1e-4, 1e-4, 1e-4, 2e-4])
 
         self.state_estimate = np.zeros(self.state_dim)
         self.control = np.zeros(self.control_dim)
