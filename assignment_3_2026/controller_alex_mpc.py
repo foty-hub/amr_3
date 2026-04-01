@@ -76,9 +76,7 @@ class MPCController:
             col = slice(step * self.control_dim, (step + 1) * self.control_dim)
             D[row, col] = eye
             if step > 0:
-                prev = slice(
-                    (step - 1) * self.control_dim, step * self.control_dim
-                )
+                prev = slice((step - 1) * self.control_dim, step * self.control_dim)
                 D[row, prev] = -eye
         return D
 
@@ -94,9 +92,7 @@ class MPCController:
                     col_step * self.control_dim, (col_step + 1) * self.control_dim
                 )
                 power = row_step - col_step
-                Phi[row, col] = (
-                    self.C @ np.linalg.matrix_power(self.A, power) @ B
-                )
+                Phi[row, col] = self.C @ np.linalg.matrix_power(self.A, power) @ B
         return Phi
 
     def _stack_reference(self, x_hat: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -142,13 +138,10 @@ class MPCController:
         delta_offset = self._delta_offset()
 
         hessian = (
-            Phi.T @ self.Q_bar @ Phi
-            + self.D.T @ self.W_delta @ self.D
-            + self.W_control
+            Phi.T @ self.Q_bar @ Phi + self.D.T @ self.W_delta @ self.D + self.W_control
         )
         gradient = (
-            Phi.T @ self.Q_bar @ tracking_error
-            - self.D.T @ self.W_delta @ delta_offset
+            Phi.T @ self.Q_bar @ tracking_error - self.D.T @ self.W_delta @ delta_offset
         )
 
         P_qp = 2.0 * hessian + 1e-8 * np.eye(self.control_dim * self.M)
