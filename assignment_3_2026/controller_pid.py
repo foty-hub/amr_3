@@ -10,12 +10,17 @@ class PIDController:
         self.integral = np.zeros(4)
         self.prev_err = np.zeros(4)
         self.history = deque(maxlen=100)
+        self.last_target = None
 
         self.Kp = np.array([0.25, 0.25, 0.25, 0.2])
         self.Ki = np.array([0.00, 0.00, 0.00, 0.0])  # no integral
         self.Kd = np.array([0.00, 0.00, 0.00, 0.0])  # no derivative
 
     def __call__(self, state, target_pos, dt):
+        if self._target_changed(target_pos):
+            self.reset()
+        self.last_target = np.array(target_pos, copy=True)
+
         err = target_pos - state
         # wrap the angular error into [-pi, +pi]
         err[3] = (err[3] + np.pi) % (2 * np.pi) - np.pi
@@ -26,12 +31,30 @@ class PIDController:
 
         return self.Kp * err + self.Ki * sum(self.history) + self.Kd * derivative
 
+    def reset(self):
+        self.integral = np.zeros(4)
+        self.prev_err = np.zeros(4)
+        self.history.clear()
+        self.last_target = None
+
+    def _target_changed(self, target_pos):
+        if self.last_target is None:
+            return False
+
+        same_position = np.allclose(target_pos[:3], self.last_target[:3], atol=1e-6)
+        same_yaw = abs((target_pos[3] - self.last_target[3] + np.pi) % (2 * np.pi) - np.pi) <= 1e-6
+        return not (same_position and same_yaw)
+
 
 def get_rot_matrix(theta):
     return np.array([[np.cos(theta), np.sin(theta)], [-np.sin(theta), np.cos(theta)]])
 
 
 pid_controller = PIDController()
+
+
+def reset():
+    pid_controller.reset()
 
 
 def controller(state, target_pos, dt, wind_enabled=False):
