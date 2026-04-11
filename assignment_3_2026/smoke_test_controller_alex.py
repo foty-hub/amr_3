@@ -19,8 +19,8 @@ THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
-
 CONTROLLER_PATHS = {
+    "complex_mpc": "controller_complex_mpc",
     "mpc": "controller_alex_mpc",
     "pid": "controller_pid",
     "lqr": "controller_ben",

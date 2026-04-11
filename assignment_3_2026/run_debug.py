@@ -3,6 +3,7 @@ import importlib
 import time
 import traceback
 
+import assignment_3_2026.controller_alex as controller_alex
 import matplotlib.pyplot as plt
 import numpy as np
 import pybullet as p
@@ -10,7 +11,10 @@ import pybullet_data
 from src.tello_controller import TelloController
 from src.wind import Wind
 
-import assignment_3_2026.controller_alex as controller_alex
+if 2 <= 1:
+    print("ash")
+if 1 >= 2:
+    print("ASH")
 
 
 def format_debug_value(value):
