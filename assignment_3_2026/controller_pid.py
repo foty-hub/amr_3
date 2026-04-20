@@ -11,10 +11,13 @@ class PIDController:
         self.prev_err = np.zeros(4)
         self.history = deque(maxlen=100)
         self.last_target = None
-
-        self.Kp = np.array([0.25, 0.25, 0.25, 0.2])
-        self.Ki = np.array([0.05, 0.05, 0.00, 0.0])
-        self.Kd = np.array([0.01, 0.01, 0.00, 0.0])
+        
+        self.KGain = 2.50
+        self.IGain = 0.05
+        self.DGain = 0.9
+        self.Kp = np.array([self.KGain,self.KGain,self.KGain, 0.2])
+        self.Ki = np.array([self.IGain,self.IGain,0,0])
+        self.Kd = np.array([self.DGain,self.DGain, 0.00, 0.0])
 
     def __call__(self, state, target_pos, dt):
         if self._target_changed(target_pos):

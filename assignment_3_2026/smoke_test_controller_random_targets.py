@@ -7,6 +7,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import random
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pybullet as p
@@ -31,6 +33,10 @@ SIM_TIMESTEP = 1.0 / 1000.0
 POS_CONTROL_TIMESTEP = 1.0 / 50.0
 SCENARIO_TIMEOUT_SECONDS = 10.0
 
+TARGET_NO = 30
+TARGET_MAX = 4
+TARGET_MIN = -4
+
 SETTLE_POSITION_THRESHOLD_M = 0.08
 SETTLE_YAW_THRESHOLD_RAD = 0.12
 SETTLE_HOLD_SECONDS = 0.50
@@ -43,13 +49,7 @@ WIND_CONFIG = {
     "k_gusts": 0.1,
 }
 
-SCENARIOS = (
-    ("x_step", (0.30, 0.00, 2.00, 0.00)),
-    ("xy_climb", (0.30, 0.30, 1.20, math.pi / 6.0)),
-    ("y_translate", (0.00, 0.30, 1.20, -math.pi / 6.0)),
-    ("diag_drop", (-0.20, -0.20, 0.90, math.pi / 2.0)),
-    ("return_home", (0.00, 0.00, 1.00, 0.00)),
-)
+SCENARIOS =  ([(f'Random Target Test: {x+1}',tuple([random.uniform(TARGET_MIN,TARGET_MAX),random.uniform(TARGET_MIN,TARGET_MAX),1,random.uniform(-math.pi,math.pi)])) for x in range(TARGET_NO)])
 
 
 @dataclass(frozen=True)
@@ -368,6 +368,9 @@ def compute_yaw_overshoot(
 
 
 def build_scenarios() -> list[Scenario]:
+    for name, target in SCENARIOS:
+        print(name)
+        print(target)
     return [Scenario(name=name, target=target) for name, target in SCENARIOS]
 
 
