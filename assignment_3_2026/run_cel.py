@@ -7,7 +7,7 @@ from src.tello_controller import TelloController
 import importlib
 import controller_cel
 from src.wind import Wind
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 
 
 class Simulator:
@@ -23,7 +23,7 @@ class Simulator:
             "resources/tello.urdf", self.start_pos, self.start_orientation
         )
         self.wind_enabled = False
-        self.wind_sim = Wind(max_steady_state=0.02, max_gust=0.02,k_gusts=0.1)
+        self.wind_sim = Wind(max_steady_state=0.02, max_gust=0.02, k_gusts=0.1)
 
         self.M = 0.088
         self.L = 0.06
@@ -51,53 +51,6 @@ class Simulator:
         )
         print(f"INFO: Target set to: {self.targets[self.current_target]}")
 
-        self.init_plot()
-
-    def init_plot(self):
-        plt.ion()
-        self.fig = plt.figure(figsize=(4, 4))
-        self.ax = self.fig.add_subplot(111, projection='3d')
-        
-        self.ax.set_xlim([-1, 1])
-        self.ax.set_ylim([-1, 1])
-        self.ax.set_zlim([-1, 1])
-        self.ax.grid(False)
-        self.ax.set_xlabel('X')
-        self.ax.set_ylabel('Y')
-        self.ax.set_zlabel('Z')
-        self.ax.set_title("Wind Speed and Direction")
-        
-        self.quiver = self.ax.quiver(0, 0, 0, 0, 0, 0, length=0, color='b')
-
-    def update_plot(self, wind_vector):
-        if self.quiver:
-            self.quiver.remove()
-        
-        scale = 30.0 
-        u, v, w = wind_vector * scale
-        magnitude = np.linalg.norm([u, v, w])
-        
-        self.quiver = self.ax.quiver(0, 0, 0, u, v, w, length=magnitude, color='c', normalize=False)
-        
-        limit = max(abs(u), abs(v), abs(w)) + 0.2
-        
-        limit = max(limit, 0.5) 
-
-        self.ax.set_xlim([-limit, limit])
-        self.ax.set_ylim([-limit, limit])
-        self.ax.set_zlim([-limit, limit])
-        
-        cam_data = p.getDebugVisualizerCamera()
-        if cam_data:
-            pb_yaw = cam_data[8]
-            pb_pitch = cam_data[9]
-            new_elev = -pb_pitch
-            new_azim = pb_yaw - 90
-            self.ax.view_init(elev=new_elev, azim=new_azim)
-
-        self.fig.canvas.draw_idle()
-        self.fig.canvas.flush_events()
-
     def load_targets(self):
         targets = []
         try:
@@ -115,7 +68,7 @@ class Simulator:
         if not targets:
             targets.append((0.0, 0.0, 0.0, 0.0))
         return targets
-
+    
     def compute_dynamics(self, rpm_values, lin_vel_world, quat):
         rotation = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
         omega = rpm_values * (2 * np.pi / 60)
@@ -144,7 +97,7 @@ class Simulator:
         if isinstance(unchecked_action, (tuple, list)):
             if len(unchecked_action) not in [4, 5]:
                 checked_action = (0, 0, 0, 0)
-                p.disconnect()
+                #p.disconnect()
             else:
                 checked_action = [
                     np.clip(unchecked_action[0], -1, 1),
@@ -156,7 +109,7 @@ class Simulator:
                     checked_action.append(unchecked_action[4])
         else:
             checked_action = (0, 0, 0, 0)
-            p.disconnect()
+            #p.disconnect()
         return tuple(checked_action)
 
     def spin_motors(self, rpm, timestep):
@@ -224,7 +177,7 @@ if __name__ == "__main__":
             desired_vel = np.array(controller_output[:3])
             yaw_rate_setpoint = controller_output[3]
             
-            sim.update_plot(current_wind_display)
+            #sim.update_plot(current_wind_display)
 
         rpm = sim.tello_controller.compute_control(
             desired_vel, lin_vel, quat, ang_vel, yaw_rate_setpoint, timestep
@@ -271,10 +224,10 @@ if __name__ == "__main__":
             sim.tello_controller.reset()
             sim.display_target()
 
-        if ord("q") in keys and keys[ord("q")] & p.KEY_WAS_TRIGGERED:
-            p.disconnect()
-            plt.close()
-            break
+        #if ord("q") in keys and keys[ord("q")] & p.KEY_WAS_TRIGGERED:
+            #p.disconnect()
+            #plt.close()
+            #break
 
         p.stepSimulation()
         loop_time = time.time() - loop_start
