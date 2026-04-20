@@ -5,7 +5,7 @@ import pybullet_data
 import numpy as np
 from src.tello_controller import TelloController
 import importlib
-import controller_cel
+import controller_pid
 from src.wind import Wind
 #import matplotlib.pyplot as plt
 
@@ -126,7 +126,7 @@ class Simulator:
 
     def reload_controller(self):
         try:
-            importlib.reload(controller_cel)
+            importlib.reload(controller_pid)
         except Exception:
             print("ERROR: Failed to reload controller module")
 
@@ -170,7 +170,7 @@ if __name__ == "__main__":
 
             state = np.concatenate((pos, p.getEulerFromQuaternion(quat)))
             controller_output = sim.check_action(
-                controller_cel.controller(
+                controller_pid.controller(
                     state, sim.targets[sim.current_target], pos_control_timestep, sim.wind_enabled
                 )
             )
