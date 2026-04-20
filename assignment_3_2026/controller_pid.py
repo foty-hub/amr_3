@@ -4,6 +4,8 @@ from collections import deque
 
 import numpy as np
 
+from save_data import save_data
+
 
 class PIDController:
     def __init__(self):
@@ -69,6 +71,7 @@ def controller(state, target_pos, dt, wind_enabled=False):
     # dt: time step (s)
     # wind_enabled: boolean flag to indicate if wind disturbance should be considered in the control algorithm
     # return velocity command format: (velocity_x_setpoint (m/s), velocity_y_setpoint (m/s), velocity_z_setpoint (m/s), yaw_rate_setpoint (radians/s))
+    state_saved = np.copy(state)
     state = np.delete(state, [3, 4])  # ignore roll/pitch
     control = pid_controller(np.array(state), np.array(target_pos), dt)
 
@@ -83,5 +86,7 @@ def controller(state, target_pos, dt, wind_enabled=False):
                     np.clip(control[2], -1, 1),
                     np.clip(control[3], -1.74533, 1.74533),
     )
-    #print(output)
+    
+    save_data(dt, state_saved, target_pos, output, wind_enabled, 'data.csv')
+
     return output
