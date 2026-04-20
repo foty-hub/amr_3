@@ -12,10 +12,10 @@ class PIDController:
         self.history = deque(maxlen=100)
         self.last_target = None
         
-        self.KGain = 2.50
+        self.KGain = 2.5
         self.IGain = 0.05
         self.DGain = 0.9
-        self.Kp = np.array([self.KGain,self.KGain,self.KGain, 0.2])
+        self.Kp = np.array([self.KGain,self.KGain,self.KGain, 5])
         self.Ki = np.array([self.IGain,self.IGain,0,0])
         self.Kd = np.array([self.DGain,self.DGain, 0.00, 0.0])
 
@@ -76,5 +76,12 @@ def controller(state, target_pos, dt, wind_enabled=False):
     theta = state[3]
     control[0:2] = get_rot_matrix(theta) @ control[0:2]
 
-    output = (control[0], control[1], control[2], control[3])
+    #output = (control[0], control[1], control[2], control[3])
+    output = (
+                    np.clip(control[0], -1, 1),
+                    np.clip(control[1], -1, 1),
+                    np.clip(control[2], -1, 1),
+                    np.clip(control[3], -1.74533, 1.74533),
+    )
+    #print(output)
     return output
