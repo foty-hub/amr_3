@@ -33,7 +33,7 @@ SIM_TIMESTEP = 1.0 / 1000.0
 POS_CONTROL_TIMESTEP = 1.0 / 50.0
 SCENARIO_TIMEOUT_SECONDS = 10.0
 
-TARGET_NO = 30
+TARGET_NO = 10
 TARGET_MAX = 4
 TARGET_MIN = -4
 
@@ -368,9 +368,6 @@ def compute_yaw_overshoot(
 
 
 def build_scenarios() -> list[Scenario]:
-    for name, target in SCENARIOS:
-        print(name)
-        print(target)
     return [Scenario(name=name, target=target) for name, target in SCENARIOS]
 
 

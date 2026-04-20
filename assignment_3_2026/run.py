@@ -1,13 +1,14 @@
-import pybullet as p
-import time
 import csv
-import pybullet_data
-import numpy as np
-from src.tello_controller import TelloController
 import importlib
-import controller_cel
-from src.wind import Wind
+import time
+
+import controller_alex_mpc as controller
 import matplotlib.pyplot as plt
+import numpy as np
+import pybullet as p
+import pybullet_data
+from src.tello_controller import TelloController
+from src.wind import Wind
 
 
 class Simulator:
@@ -23,7 +24,7 @@ class Simulator:
             "resources/tello.urdf", self.start_pos, self.start_orientation
         )
         self.wind_enabled = False
-        self.wind_sim = Wind(max_steady_state=0.02, max_gust=0.02,k_gusts=0.1)
+        self.wind_sim = Wind(max_steady_state=0.02, max_gust=0.02, k_gusts=0.1)
 
         self.M = 0.088
         self.L = 0.06
@@ -56,37 +57,39 @@ class Simulator:
     def init_plot(self):
         plt.ion()
         self.fig = plt.figure(figsize=(4, 4))
-        self.ax = self.fig.add_subplot(111, projection='3d')
-        
+        self.ax = self.fig.add_subplot(111, projection="3d")
+
         self.ax.set_xlim([-1, 1])
         self.ax.set_ylim([-1, 1])
         self.ax.set_zlim([-1, 1])
         self.ax.grid(False)
-        self.ax.set_xlabel('X')
-        self.ax.set_ylabel('Y')
-        self.ax.set_zlabel('Z')
+        self.ax.set_xlabel("X")
+        self.ax.set_ylabel("Y")
+        self.ax.set_zlabel("Z")
         self.ax.set_title("Wind Speed and Direction")
-        
-        self.quiver = self.ax.quiver(0, 0, 0, 0, 0, 0, length=0, color='b')
+
+        self.quiver = self.ax.quiver(0, 0, 0, 0, 0, 0, length=0, color="b")
 
     def update_plot(self, wind_vector):
         if self.quiver:
             self.quiver.remove()
-        
-        scale = 30.0 
+
+        scale = 30.0
         u, v, w = wind_vector * scale
         magnitude = np.linalg.norm([u, v, w])
-        
-        self.quiver = self.ax.quiver(0, 0, 0, u, v, w, length=magnitude, color='c', normalize=False)
-        
+
+        self.quiver = self.ax.quiver(
+            0, 0, 0, u, v, w, length=magnitude, color="c", normalize=False
+        )
+
         limit = max(abs(u), abs(v), abs(w)) + 0.2
-        
-        limit = max(limit, 0.5) 
+
+        limit = max(limit, 0.5)
 
         self.ax.set_xlim([-limit, limit])
         self.ax.set_ylim([-limit, limit])
         self.ax.set_zlim([-limit, limit])
-        
+
         cam_data = p.getDebugVisualizerCamera()
         if cam_data:
             pb_yaw = cam_data[8]
@@ -105,8 +108,10 @@ class Simulator:
                 csvreader = csv.reader(file)
                 header = next(csvreader)
                 for row in csvreader:
-                    if len(row) != 4: continue
-                    if float(row[2]) < 0: continue
+                    if len(row) != 4:
+                        continue
+                    if float(row[2]) < 0:
+                        continue
                     targets.append(
                         (float(row[0]), float(row[1]), float(row[2]), float(row[3]))
                     )
@@ -127,8 +132,12 @@ class Simulator:
         force = drag_body + thrust
         z_torques = omega_squared * self.KM
         z_torque = -z_torques[0] - z_torques[1] + z_torques[2] + z_torques[3]
-        x_torque = (-motor_forces[0] + motor_forces[1] + motor_forces[2] - motor_forces[3]) * self.L
-        y_torque = (-motor_forces[0] + motor_forces[1] - motor_forces[2] + motor_forces[3]) * self.L
+        x_torque = (
+            -motor_forces[0] + motor_forces[1] + motor_forces[2] - motor_forces[3]
+        ) * self.L
+        y_torque = (
+            -motor_forces[0] + motor_forces[1] - motor_forces[2] + motor_forces[3]
+        ) * self.L
         torques = np.array([x_torque, y_torque, z_torque])
         return force, torques
 
@@ -173,13 +182,12 @@ class Simulator:
 
     def reload_controller(self):
         try:
-            importlib.reload(controller_cel)
+            importlib.reload(controller)
         except Exception:
             print("ERROR: Failed to reload controller module")
 
 
 if __name__ == "__main__":
-
     sim = Simulator()
     timestep = 1.0 / 1000  # 1000 Hz
     pos_control_timestep = 1.0 / 50  # 20 Hz
@@ -189,7 +197,7 @@ if __name__ == "__main__":
     prev_rpm = np.array([0, 0, 0, 0])
     desired_vel = np.array([0, 0, 0])
     yaw_rate_setpoint = 0
-    
+
     current_wind_display = np.array([0.0, 0.0, 0.0])
 
     while True:
@@ -203,27 +211,30 @@ if __name__ == "__main__":
         yaw_quat = p.getQuaternionFromEuler([0, 0, yaw])
         inverted_pos, inverted_quat = p.invertTransform([0, 0, 0], quat)
         inverted_pos_yaw, inverted_quat_yaw = p.invertTransform([0, 0, 0], yaw_quat)
-        
+
         lin_vel = p.rotateVector(inverted_quat_yaw, lin_vel_world)
         ang_vel = p.rotateVector(inverted_quat, ang_vel_world)
         lin_vel = np.array(lin_vel)
         ang_vel = np.array(ang_vel)
-        
+
         if loop_counter >= steps_between_pos_control:
             loop_counter = 0
-            
+
             if sim.wind_enabled:
                 wind_mag = np.linalg.norm(current_wind_display)
 
             state = np.concatenate((pos, p.getEulerFromQuaternion(quat)))
             controller_output = sim.check_action(
-                controller_cel.controller(
-                    state, sim.targets[sim.current_target], pos_control_timestep, sim.wind_enabled
+                controller.controller(
+                    state,
+                    sim.targets[sim.current_target],
+                    pos_control_timestep,
+                    sim.wind_enabled,
                 )
             )
             desired_vel = np.array(controller_output[:3])
             yaw_rate_setpoint = controller_output[3]
-            
+
             sim.update_plot(current_wind_display)
 
         rpm = sim.tello_controller.compute_control(
@@ -239,7 +250,9 @@ if __name__ == "__main__":
         current_wind_display = np.array([0.0, 0.0, 0.0])
         if sim.wind_enabled:
             current_wind_display = sim.wind_sim.get_wind(timestep)
-            p.applyExternalForce(sim.drone_id, -1, current_wind_display, pos, p.WORLD_FRAME)
+            p.applyExternalForce(
+                sim.drone_id, -1, current_wind_display, pos, p.WORLD_FRAME
+            )
 
         sim.spin_motors(rpm, timestep)
 
@@ -253,7 +266,9 @@ if __name__ == "__main__":
                 print(f"INFO: Wind disturbance DISABLED.")
 
         if ord("r") in keys and keys[ord("r")] & p.KEY_WAS_TRIGGERED:
-            p.resetBasePositionAndOrientation(sim.drone_id, sim.start_pos, sim.start_orientation)
+            p.resetBasePositionAndOrientation(
+                sim.drone_id, sim.start_pos, sim.start_orientation
+            )
             sim.prev_rpm = np.array([0, 0, 0, 0])
             sim.tello_controller.reset()
             sim.reload_controller()
@@ -265,7 +280,7 @@ if __name__ == "__main__":
             sim.current_target = (sim.current_target + 1) % len(sim.targets)
             sim.tello_controller.reset()
             sim.display_target()
-        
+
         if p.B3G_LEFT_ARROW in keys and keys[p.B3G_LEFT_ARROW] & p.KEY_WAS_TRIGGERED:
             sim.current_target = (sim.current_target - 1) % len(sim.targets)
             sim.tello_controller.reset()

@@ -1,8 +1,8 @@
 # wind_flag = False
 # Implement a controller
 
-from pathlib import Path
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import numpy as np
 from qpsolvers import solve_qp
@@ -80,26 +80,20 @@ class ComplexMPCController:
         self.yaw_decay, self.yaw_static_gain = self._derive_yaw_model()
 
         self.stage_weights = np.diag([18.0, 18.0, 24.0, 10.0, 10.0, 12.0, 16.0, 5.0])
-        self.terminal_weights = np.diag(
-            [32.0, 32.0, 40.0, 16.0, 16.0, 20.0, 24.0, 8.0]
-        )
+        self.terminal_weights = np.diag([32.0, 32.0, 40.0, 16.0, 16.0, 20.0, 24.0, 8.0])
         self.Q_bar = self._build_state_cost()
 
         self.delta_weights = np.array([14.76, 14.76, 18.04, 3.28])
         self.absolute_control_weights = np.array([6.24, 6.24, 7.02, 1.404])
         self.bias_tracking_weights = np.array([16.1, 16.1, 18.4, 4.025])
         self.W_delta = np.kron(np.eye(self.M), np.diag(self.delta_weights))
-        self.W_control = np.kron(
-            np.eye(self.M), np.diag(self.absolute_control_weights)
-        )
-        self.W_bias = np.kron(
-            np.eye(self.M), np.diag(self.bias_tracking_weights)
-        )
+        self.W_control = np.kron(np.eye(self.M), np.diag(self.absolute_control_weights))
+        self.W_bias = np.kron(np.eye(self.M), np.diag(self.bias_tracking_weights))
         self.D = self._build_delta_matrix()
 
         yaw_limit = min(0.90, YAW_RATE_LIMIT)
-        self.control_lb = np.array([-0.29, -0.29, -0.32, -yaw_limit])
-        self.control_ub = np.array([0.29, 0.29, 0.32, yaw_limit])
+        self.control_lb = np.array([-1.0, -1.0, -1.0, -yaw_limit])
+        self.control_ub = np.array([1.0, 1.0, 1.0, yaw_limit])
         self.lb = np.tile(self.control_lb, self.M)
         self.ub = np.tile(self.control_ub, self.M)
 
@@ -140,7 +134,10 @@ class ComplexMPCController:
         blocks[-1] = self.terminal_weights.copy()
         return np.block(
             [
-                [blocks[i] if i == j else np.zeros_like(blocks[0]) for j in range(self.M)]
+                [
+                    blocks[i] if i == j else np.zeros_like(blocks[0])
+                    for j in range(self.M)
+                ]
                 for i in range(self.M)
             ]
         )
@@ -153,9 +150,7 @@ class ComplexMPCController:
             col = slice(step * self.control_dim, (step + 1) * self.control_dim)
             D[row, col] = eye
             if step > 0:
-                prev = slice(
-                    (step - 1) * self.control_dim, step * self.control_dim
-                )
+                prev = slice((step - 1) * self.control_dim, step * self.control_dim)
                 D[row, prev] = -eye
         return D
 
@@ -248,7 +243,9 @@ class ComplexMPCController:
         return offset
 
     def _bias_control(self, x_hat, yaw):
-        position_error_body = rotation_world_to_body(yaw) @ x_hat[self.position_error_slice]
+        position_error_body = (
+            rotation_world_to_body(yaw) @ x_hat[self.position_error_slice]
+        )
         control = self.bias_gains * np.array(
             [
                 position_error_body[0],

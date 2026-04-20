@@ -3,8 +3,13 @@
 
 import numpy as np
 from qpsolvers import solve_qp
+from save_data import save_data
 
 YAW_RATE_LIMIT = 1.74533
+CONTROL_LIMIT = 1.0
+HORIZON = 15
+REGULARISATION_STRENGTH = 3.0
+OUTPUT_FILE = "data1.csv"
 
 
 def wrap_angle(angle):
@@ -12,7 +17,7 @@ def wrap_angle(angle):
 
 
 class MPCController:
-    def __init__(self, horizon: int = 5):
+    def __init__(self, horizon: int = HORIZON):
         self.horizon = horizon
         self.state_dim = 4
         self.control_dim = 4
@@ -20,13 +25,19 @@ class MPCController:
         self.C = np.eye(self.state_dim)
         self.M = horizon
 
-        self.state_weights = np.array([2.0, 2.0, 2.5, 1.5])
-        self.delta_weights = np.array([16.0, 16.0, 20.0, 6.0])
-        self.control_regularization_weights = np.array([0.40, 0.40, 0.45, 0.14])
+        self.state_weights = np.array([2.0, 2.0, 2.5, 2.5])
+        self.delta_weights = np.array([16.0, 16.0, 16.0, 3.0])
+        self.control_regularization_weights = (
+            np.array([0.40, 0.40, 0.40, 0.07]) * REGULARISATION_STRENGTH
+        )
 
         yaw_limit = min(0.35, YAW_RATE_LIMIT)
-        self.control_lb = np.array([-0.14, -0.14, -0.14, -yaw_limit])
-        self.control_ub = np.array([0.14, 0.14, 0.14, yaw_limit])
+        self.control_lb = np.array(
+            [-CONTROL_LIMIT, -CONTROL_LIMIT, -CONTROL_LIMIT, -yaw_limit]
+        )
+        self.control_ub = np.array(
+            [CONTROL_LIMIT, CONTROL_LIMIT, CONTROL_LIMIT, yaw_limit]
+        )
 
         self.Lambda = self._build_lambda()
         self.Q_bar = np.kron(np.eye(self.M), np.diag(self.state_weights))
@@ -189,26 +200,21 @@ def get_rot_matrix(theta):
 mpc_controller = MPCController()
 
 
-def reset():
-    mpc_controller.reset()
-
-
 def controller(state, target_pos, dt, wind_enabled=False):
     # state format: [position_x (m), position_y (m), position_z (m), roll (radians), pitch (radians), yaw (radians)]
     # target_pos format: (x (m), y (m), z (m), yaw (radians))
     # dt: time step (s)
     # wind_enabled: boolean flag to indicate if wind disturbance should be considered in the control algorithm
     # return velocity command format: (velocity_x_setpoint (m/s), velocity_y_setpoint (m/s), velocity_z_setpoint (m/s), yaw_rate_setpoint (radians/s))
-    del wind_enabled
-
     state = np.asarray(state, dtype=float)
     target = np.asarray(target_pos, dtype=float)
 
-    state = np.delete(state, [3, 4])
-    control_world = mpc_controller(state, target, dt)
-    control_body = control_world.copy()
+    state_trimmed = np.delete(state, [3, 4])
+    control = mpc_controller(state_trimmed, target, dt)
 
-    theta = state[3]
-    control_body[0:2] = get_rot_matrix(theta) @ control_body[0:2]
+    theta = state_trimmed[3]
+    control[0:2] = get_rot_matrix(theta) @ control[0:2]
 
-    return tuple(control_body.tolist())
+    save_data(dt, state, target_pos, control, wind_enabled, OUTPUT_FILE)
+
+    return tuple(control.tolist())
