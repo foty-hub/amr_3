@@ -6,8 +6,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "djitellopy>=2.5.0",
+    "ipykernel>=7.2.0",
+    "ipympl>=0.10.0",
     "matplotlib>=3.10.8",
     "numpy>=2.4.3",
+    "pandas>=3.0.2",
     "pybullet>=3.2.7",
     "pyvicon-datastream>=0.2.4",
     "qpsolvers[open-source-solvers]>=4.11.0",
