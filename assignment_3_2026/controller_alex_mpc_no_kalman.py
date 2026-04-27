@@ -9,8 +9,8 @@
 # C = I_{4x4}
 # D = 0_{4x4}
 #
-# In addition to MPC, this controller implements a Kalman filter to smooth observations.
-# This has no effect on the sim, but may be useful for the real hardware loop with noisy measurements.
+# This variant runs the same MPC logic directly on the latest observed state,
+# without applying the Kalman-filter smoothing used by controller_alex_mpc.py.
 
 import csv
 import time
@@ -23,8 +23,8 @@ from qpsolvers import solve_qp
 # the real-hardware limits are clipped to [-0.3, 0.3]
 POS_CONTROL_LIMIT = 0.5
 YAW_CONTROL_LIMIT = 0.5
-HORIZON = 7  # How many steps forwards to consider in the MPC optimisation
-DELTA_REGULARISATION_STRENGTH = 1.0
+HORIZON = 10  # How many steps forwards to consider in the MPC optimisation
+DELTA_REGULARISATION_STRENGTH = 0.1
 CONTROL_REGULARISATION_STRENGTH = 3.0
 OUTPUT_FILE = "data.csv"
 
@@ -37,6 +37,10 @@ def write_data(
     wind_enabled: bool,
     output_file: str,
 ):
+    """
+    Write data to a persistent CSV file. This function appends so
+    we do not need a new file for each run
+    """
     row = dict(
         recording_time_ns=time.time_ns(),
         dt=dt,
@@ -82,8 +86,8 @@ class MPCController:
         to precompute the Hessian, but as the hardware system sees variable-length timesteps we instead
         compute it per-call.
 
-        In addition to MPC, this controller also applies a Kalman filter to observations, operating on
-        smoothed state estimates."""
+        This variant does not filter observations before passing them into the MPC solve.
+        """
         self.horizon = horizon
         self.state_dim = 4
         self.control_dim = 4
@@ -93,14 +97,17 @@ class MPCController:
         self.A = np.eye(self.state_dim)
         self.C = np.eye(self.state_dim)
         self.M = horizon
+
+        # We pass regularisation strengths as arguments to enable tuning in a loop
         self.delta_regularisation_strength = delta_regularisation_strength
         self.control_regularisation_strength = control_regularisation_strength
 
         # These weights define the constrained optimisation MPC problem
         #  - The state weights penalise states which are far from the target position
-        #  - The delta weights penalise rapid changes in the control signal
-        #  - The control regularisation penalises large control signals. This is set lower than
-        #     the other weights so that, all other things equal, the controller prefers
+        #  - The delta weights penalise rapid changes in the control signal, encouraging
+        #     smooth changes in the control signal
+        #  - The control regularisation penalises large control signals. This is set low
+        #     so that, all other things equal, the controller prefers
         #     a trajectory with lower rotor speeds
         self.state_weights = np.array([5.0, 5.0, 5.0, 1.5])
         self.delta_weights = (
@@ -110,15 +117,15 @@ class MPCController:
             np.array([0.40, 0.40, 0.40, 0.07]) * control_regularisation_strength
         )
 
-        # Because we're doing linear MPC, which just uses a quadratic solver, we can
-        # bound the valid control signals - these variables set those bounds
+        # This is linear MPC, which uses a quadratic solver capable of constrained
+        # optimisation - these variables set the bounds for the control signal
         self.control_ub = np.array(
             [POS_CONTROL_LIMIT, POS_CONTROL_LIMIT, POS_CONTROL_LIMIT, YAW_CONTROL_LIMIT]
         )
         self.control_lb = -self.control_ub
 
         # Build the matrices used for MPC. We use np.kron to construct block matrices
-        # Because MPC unrolls state prediction over a horizon, all the matrices are expanded to be
+        # Because MPC unrolls prediction over a horizon, matrices are expanded to
         # of shape (control_dim * horizon) - hence the block structure
         self.Lambda = self._build_lambda()
         self.Q_bar = np.kron(np.eye(self.M), np.diag(self.state_weights))
@@ -130,13 +137,7 @@ class MPCController:
         self.lb = np.tile(self.control_lb, self.M)
         self.ub = np.tile(self.control_ub, self.M)
 
-        # In addition to MPC, we implement a Kalman filter to denoise real state observations on
-        # the hardware - these are the process matrices for the Kalman filter.
-        self.P = np.eye(self.state_dim)
-        self.Q_kf = np.diag([8e-4, 8e-4, 8e-4, 1.6e-3])
-        self.R_kf = np.diag([1e-4, 1e-4, 1e-4, 2e-4])
-        self.state_estimate = np.zeros(self.state_dim)
-
+        # Initialise the
         self.control = np.zeros(self.control_dim)
 
     def _build_lambda(self) -> np.ndarray:
@@ -181,8 +182,8 @@ class MPCController:
     def _stack_reference(self, x_hat: np.ndarray, target: np.ndarray) -> np.ndarray:
         """Stacks the reference over the length of the horizon"""
         reference = target.copy()
-        # cheeky trick so that reference will be wrapped around to the positive/negative angle
-        # that's closest to x_hat -> so it won't overrotate to achieve the target yaw
+        # wrap the target yaw to the angle closest to the current position
+        # so it won't over-rotate to achieve the target yaw
         reference[3] = x_hat[3] + wrap_angle(reference[3] - x_hat[3])
         # Repeat the reference over the length of the horizon
         return np.tile(reference, self.M)
@@ -193,31 +194,6 @@ class MPCController:
         offset[: self.control_dim] = self.control
         return offset
 
-    def kalman_filter(
-        self,
-        x_hat: np.ndarray,
-        B: np.ndarray,
-        u_prev: np.ndarray,
-        measurement: np.ndarray,
-    ) -> np.ndarray:
-        """Implements a basic Kalman filter to smooth state measurements."""
-        x_prior = self.A @ x_hat + B @ u_prev
-        P_prior = self.A @ self.P @ self.A.T + self.Q_kf
-        y_pred = self.C @ x_prior
-
-        residual = measurement - y_pred
-        residual[3] = wrap_angle(residual[3])  # ensures yaw is in [-pi, pi]
-
-        cov = self.C @ P_prior @ self.C.T + self.R_kf
-        kalman_gain = P_prior @ self.C.T @ np.linalg.inv(cov)
-
-        x_post = x_prior + kalman_gain @ residual
-        x_post[3] = wrap_angle(x_post[3])
-        self.P = (np.eye(self.state_dim) - kalman_gain @ self.C) @ P_prior
-        # For numerical stability, ensure P is symmetric
-        self.P = 0.5 * (self.P + self.P.T)
-        return x_post
-
     def _build_qp(
         self, x_hat: np.ndarray, target: np.ndarray, dt: float
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -226,8 +202,8 @@ class MPCController:
         B = self._get_B(dt)
         Phi = self._get_Phi(B)
 
-        # We assume a constant reference over the course of the trajectory. This is a
-        # reasonable since the target only undergoes step changes
+        # We assume a constant reference over the horizon. This makes sense,
+        # we're regulating to fixed points, not tracking a changing trajectory
         reference = self._stack_reference(x_hat, target)
         tracking_error = self.Lambda @ x_hat - reference
         delta_offset = self._delta_offset()
@@ -240,24 +216,13 @@ class MPCController:
             Phi.T @ self.Q_bar @ tracking_error - self.D.T @ self.W_delta @ delta_offset
         )
 
-        # Extra tricks for numerical stability: Add an epsilon along the diagonal (so eigenvalues are nonzero)
-        # and symmetrise so P_qp is guaranteed positive semidefinite for the solver.
+        # Conditioning tricks for numerical stability:
+        # - Add an epsilon along the diagonal so eigenvalues are guaranteed nonzero
+        # - Symmetrise so P is guaranteed positive semidefinite
         P_qp = 2.0 * hessian + 1e-8 * np.eye(self.control_dim * self.M)
         P_qp = 0.5 * (P_qp + P_qp.T)
         q_qp = 2.0 * gradient
         return P_qp, q_qp
-
-    def mpc(self, x_hat: np.ndarray, target: np.ndarray, dt: float) -> np.ndarray:
-        P_qp, q_qp = self._build_qp(x_hat, target, dt)
-        # Solve the constrained optimisation using qpsolvers to find the optimal trajectory u_opt.
-        # u_opt should never be None given the conditioning in _build_qp, but just in case
-        # we add a guard to prevent crashes
-        u_opt = solve_qp(P_qp, q_qp, lb=self.lb, ub=self.ub, solver="cvxopt")
-        if u_opt is None:
-            return self.control.copy()
-
-        # Return only the first step of the optimal trajectory - this is the classic MPC approach.
-        return np.asarray(u_opt[: self.control_dim], dtype=float)
 
     def __call__(
         self,
@@ -265,23 +230,21 @@ class MPCController:
         target: np.ndarray,
         dt: float,
     ) -> np.ndarray:
-        B = self._get_B(dt)
-        # Pass the state measurement through a Kalman filter to smooth out noise
-        self.state_estimate = self.kalman_filter(
-            self.state_estimate,
-            B,
-            self.control,
-            measurement,
-        )
+        P_qp, q_qp = self._build_qp(measurement, target, dt)
+        # Solve the constrained optimisation using qpsolvers, giving the optimal trajectory u_opt.
+        # u_opt should never be None given the conditioning in _build_qp, but
+        # we add a guard to satisfy the type checker.
+        u_opt = solve_qp(P_qp, q_qp, lb=self.lb, ub=self.ub, solver="cvxopt")
+        if u_opt is None:
+            return self.control.copy()
 
-        # Perform MPC to get the control at the next step
-        self.control = self.mpc(self.state_estimate, target, dt)
-        # make a copy in case the control is modified elsewhere
-        return self.control.copy()
+        # Return only the first step of the optimal trajectory - this is classic MPC.
+        return np.asarray(u_opt[: self.control_dim], dtype=float)
 
 
 def get_rot_matrix(theta):
-    "Returns a 2x2 matrix representing the 2D rotation matrix for a rotation around the z-axis."
+    """Returns a 2x2 matrix representing the 2D rotation
+    matrix for a rotation around the z-axis."""
     return np.array([[np.cos(theta), np.sin(theta)], [-np.sin(theta), np.cos(theta)]])
 
 
@@ -294,6 +257,7 @@ def configure_controller(
     delta_regularisation_strength: float = DELTA_REGULARISATION_STRENGTH,
     control_regularisation_strength: float = CONTROL_REGULARISATION_STRENGTH,
 ) -> MPCController:
+    """Modifies the global controller. Should only be invoked for tuning"""
     global mpc_controller
     mpc_controller = MPCController(
         horizon=horizon,
@@ -317,13 +281,14 @@ def controller(state, target_pos, dt, wind_enabled=False, save_data=True):
     state_trimmed = np.delete(state, [3, 4])
     control = mpc_controller(state_trimmed, target, dt)
 
-    # We get the state and target_pos in world coordinates, but the control is in the drone's
-    # local coordinate system. We're told we can ignore pitch and yaw, so we can simply
-    # rotate the control signal by the 2D rotation matrix to convert to the right frame.
+    # We get state and target_pos in the world frame, but the control is in
+    # the drone's local frame. We can ignore pitch and yaw, so rotate the xy
+    # velocities by a 2D rotation matrix to convert to the right frame.
     yaw = state_trimmed[3]
     control[0:2] = get_rot_matrix(yaw) @ control[0:2]
 
-    # Save data to the output file. This appends so we don't need to change the file for each run.
+    # Save data to the output file. This appends so we don't need to change
+    # the file for each run.
     if save_data:
         write_data(dt, state, target_pos, control, wind_enabled, OUTPUT_FILE)
 

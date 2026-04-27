@@ -22,6 +22,7 @@ if str(THIS_DIR) not in sys.path:
 CONTROLLER_PATHS = {
     "complex_mpc": "controller_complex_mpc",
     "mpc": "controller_alex_mpc",
+    "mpc_no_kalman": "controller_alex_mpc_no_kalman",
     "pid": "controller_pid",
     "lqr": "controller_ben",
 }

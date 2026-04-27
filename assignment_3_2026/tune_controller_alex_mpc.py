@@ -12,14 +12,14 @@ THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
-import controller_alex_mpc
+import controller_alex_mpc_no_kalman as controller_alex_mpc
 
-HORIZON_VALUES = (5, 10, 15, 20, 25)
-DELTA_REGULARISATION_VALUES = (0.5, 1.0, 2.0)
-CONTROL_REGULARISATION_VALUES = (1.5, 3.0, 6.0)
+HORIZON_VALUES = (1, 5, 10, 15, 20)
+DELTA_REGULARISATION_VALUES = (0.1, 0.5, 1.0, 2.0, 3.0)
+CONTROL_REGULARISATION_VALUES = (3.0,)
 STD_WEIGHT = 0.1
 DEFAULT_WIND_ENABLED = False
-DEFAULT_CSV_OUTPUT = THIS_DIR / "tune_controller_alex_mpc_results.csv"
+DEFAULT_CSV_OUTPUT = THIS_DIR / "tune_controller_alex_mpc_no_kalman_results.csv"
 POSITIONAL_MEAN_ERROR_GOAL_M = 0.01
 POSITIONAL_ERROR_STD_GOAL_M = 0.01
 YAW_MEAN_ERROR_GOAL_RAD = 0.01
@@ -93,10 +93,9 @@ def score_aggregate(
         aggregate["measurement_sample_mean_position_error_m"]
         + aggregate["measurement_sample_mean_yaw_error_rad"]
     )
-    std_error = (
-        error_std(aggregate, "measurement_sample_position_error_variance_m2")
-        + error_std(aggregate, "measurement_sample_yaw_error_variance_rad2")
-    )
+    std_error = error_std(
+        aggregate, "measurement_sample_position_error_variance_m2"
+    ) + error_std(aggregate, "measurement_sample_yaw_error_variance_rad2")
     return float(mean_error + std_weight * std_error)
 
 
@@ -318,7 +317,7 @@ def write_csv(tuning_result: dict[str, object], output_path: Path) -> Path:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Tune controller_alex_mpc.py with the random-target smoke test."
+        description="Tune controller_alex_mpc_no_kalman.py with the random-target smoke test."
     )
     parser.add_argument(
         "--wind",
