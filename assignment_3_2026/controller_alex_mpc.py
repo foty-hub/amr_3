@@ -12,18 +12,58 @@
 # In addition to MPC, this controller implements a Kalman filter to smooth observations.
 # This has no effect on the sim, but may be useful for the real hardware loop with noisy measurements.
 
+import csv
+import time
+from pathlib import Path
+
 import numpy as np
 from qpsolvers import solve_qp
-from save_data import save_data as write_data
 
 # These are the limits placed on the sim - but note that
 # the real-hardware limits are clipped to [-0.3, 0.3]
-POS_CONTROL_LIMIT = 1.0
-YAW_CONTROL_LIMIT = 1.74533
-HORIZON = 15  # How many steps forwards to consider in the MPC optimisation
+POS_CONTROL_LIMIT = 0.5
+YAW_CONTROL_LIMIT = 0.5
+HORIZON = 7  # How many steps forwards to consider in the MPC optimisation
 DELTA_REGULARISATION_STRENGTH = 1.0
 CONTROL_REGULARISATION_STRENGTH = 3.0
 OUTPUT_FILE = "data.csv"
+
+
+def write_data(
+    dt: float,
+    state: np.ndarray,
+    target: np.ndarray,
+    control_output: np.ndarray,
+    wind_enabled: bool,
+    output_file: str,
+):
+    row = dict(
+        recording_time_ns=time.time_ns(),
+        dt=dt,
+        wind_enabled=wind_enabled,
+        pos_x=state[0],
+        pos_y=state[1],
+        pos_z=state[2],
+        pos_roll=state[3],
+        pos_pitch=state[4],
+        pos_yaw=state[5],
+        targetpos_x=target[0],
+        targetpos_y=target[1],
+        targetpos_z=target[2],
+        targetpos_yaw=target[3],
+        control_vel_x=control_output[0],
+        control_vel_y=control_output[1],
+        control_vel_z=control_output[2],
+        control_vel_yaw=control_output[3],
+    )
+
+    file_exists = Path(output_file).is_file()
+
+    with open(output_file, mode="a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=row.keys())
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def wrap_angle(angle: float) -> float:
@@ -62,7 +102,7 @@ class MPCController:
         #  - The control regularisation penalises large control signals. This is set lower than
         #     the other weights so that, all other things equal, the controller prefers
         #     a trajectory with lower rotor speeds
-        self.state_weights = np.array([2.0, 2.0, 2.0, 2.5])
+        self.state_weights = np.array([4.0, 4.0, 4.0, 1.5])
         self.delta_weights = (
             np.array([16.0, 16.0, 16.0, 3.0]) * delta_regularisation_strength
         )
