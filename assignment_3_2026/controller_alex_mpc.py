@@ -14,14 +14,15 @@
 
 import numpy as np
 from qpsolvers import solve_qp
-from save_data import save_data
+from save_data import save_data as write_data
 
 # These are the limits placed on the sim - but note that
 # the real-hardware limits are clipped to [-0.3, 0.3]
 POS_CONTROL_LIMIT = 1.0
 YAW_CONTROL_LIMIT = 1.74533
 HORIZON = 15  # How many steps forwards to consider in the MPC optimisation
-REGULARISATION_STRENGTH = 3.0  # multiplier to tweak regularisation strentch quickly
+DELTA_REGULARISATION_STRENGTH = 1.0
+CONTROL_REGULARISATION_STRENGTH = 3.0
 OUTPUT_FILE = "data.csv"
 
 
@@ -31,7 +32,12 @@ def wrap_angle(angle: float) -> float:
 
 
 class MPCController:
-    def __init__(self, horizon: int = HORIZON):
+    def __init__(
+        self,
+        horizon: int = HORIZON,
+        delta_regularisation_strength: float = DELTA_REGULARISATION_STRENGTH,
+        control_regularisation_strength: float = CONTROL_REGULARISATION_STRENGTH,
+    ):
         """Sets up the MPC controller and precomputes all possible matrices. Note that it is typical
         to precompute the Hessian, but as the hardware system sees variable-length timesteps we instead
         compute it per-call.
@@ -47,6 +53,8 @@ class MPCController:
         self.A = np.eye(self.state_dim)
         self.C = np.eye(self.state_dim)
         self.M = horizon
+        self.delta_regularisation_strength = delta_regularisation_strength
+        self.control_regularisation_strength = control_regularisation_strength
 
         # These weights define the constrained optimisation MPC problem
         #  - The state weights penalise states which are far from the target position
@@ -55,9 +63,11 @@ class MPCController:
         #     the other weights so that, all other things equal, the controller prefers
         #     a trajectory with lower rotor speeds
         self.state_weights = np.array([2.0, 2.0, 2.0, 2.5])
-        self.delta_weights = np.array([16.0, 16.0, 16.0, 3.0])
+        self.delta_weights = (
+            np.array([16.0, 16.0, 16.0, 3.0]) * delta_regularisation_strength
+        )
         self.control_regularization_weights = (
-            np.array([0.40, 0.40, 0.40, 0.07]) * REGULARISATION_STRENGTH
+            np.array([0.40, 0.40, 0.40, 0.07]) * control_regularisation_strength
         )
 
         # Because we're doing linear MPC, which just uses a quadratic solver, we can
@@ -239,7 +249,21 @@ def get_rot_matrix(theta):
 mpc_controller = MPCController()
 
 
-def controller(state, target_pos, dt, wind_enabled=False):
+def configure_controller(
+    horizon: int = HORIZON,
+    delta_regularisation_strength: float = DELTA_REGULARISATION_STRENGTH,
+    control_regularisation_strength: float = CONTROL_REGULARISATION_STRENGTH,
+) -> MPCController:
+    global mpc_controller
+    mpc_controller = MPCController(
+        horizon=horizon,
+        delta_regularisation_strength=delta_regularisation_strength,
+        control_regularisation_strength=control_regularisation_strength,
+    )
+    return mpc_controller
+
+
+def controller(state, target_pos, dt, wind_enabled=False, save_data=True):
     # state format: [position_x (m), position_y (m), position_z (m), roll (radians), pitch (radians), yaw (radians)]
     # target_pos format: (x (m), y (m), z (m), yaw (radians))
     # dt: time step (s)
@@ -260,6 +284,7 @@ def controller(state, target_pos, dt, wind_enabled=False):
     control[0:2] = get_rot_matrix(yaw) @ control[0:2]
 
     # Save data to the output file. This appends so we don't need to change the file for each run.
-    save_data(dt, state, target_pos, control, wind_enabled, OUTPUT_FILE)
+    if save_data:
+        write_data(dt, state, target_pos, control, wind_enabled, OUTPUT_FILE)
 
     return tuple(control.tolist())

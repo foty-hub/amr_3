@@ -31,16 +31,16 @@ DEFAULT_CONTROLLER = "pid"
 
 SIM_TIMESTEP = 1.0 / 1000.0
 POS_CONTROL_TIMESTEP = 1.0 / 50.0
-SCENARIO_TIMEOUT_SECONDS = 10.0
 
-TARGET_NO = 10
+RANDOM_SEED = 0
+TARGET_NO = 25
 TARGET_MAX = 4
 TARGET_MIN = -4
+TARGET_Z = 1.0
 
-SETTLE_POSITION_THRESHOLD_M = 0.08
-SETTLE_YAW_THRESHOLD_RAD = 0.12
-SETTLE_HOLD_SECONDS = 0.50
-METRIC_WINDOW_SECONDS = 0.50
+SETTLING_WINDOW_SECONDS = 10.0
+MEASUREMENT_WINDOW_SECONDS = 10.0
+SCENARIO_TIMEOUT_SECONDS = SETTLING_WINDOW_SECONDS + MEASUREMENT_WINDOW_SECONDS
 
 ENABLE_WIND = False
 WIND_CONFIG = {
@@ -48,8 +48,6 @@ WIND_CONFIG = {
     "max_gust": 0.02,
     "k_gusts": 0.1,
 }
-
-SCENARIOS =  ([(f'Random Target Test: {x+1}',tuple([random.uniform(TARGET_MIN,TARGET_MAX),random.uniform(TARGET_MIN,TARGET_MAX),1,random.uniform(-math.pi,math.pi)])) for x in range(TARGET_NO)])
 
 
 @dataclass(frozen=True)
@@ -77,8 +75,6 @@ class ScenarioResult:
     start_time_s: float
     end_time_s: float
     duration_s: float
-    settled: bool
-    settling_time_s: float | None
     final_position_error_m: float
     final_yaw_error_rad: float
     mean_position_error_m: float
@@ -87,7 +83,15 @@ class ScenarioResult:
     yaw_error_variance_rad2: float
     peak_position_overshoot_m: float
     peak_yaw_overshoot_rad: float
+    mean_abs_x_error_m: float
+    mean_abs_y_error_m: float
+    mean_abs_z_error_m: float
+    mean_abs_yaw_error_rad: float
+    x_error_variance_m2: float
+    y_error_variance_m2: float
+    z_error_variance_m2: float
     sample_count: int
+    measurement_sample_count: int
     time_trace_s: np.ndarray
     position_trace: np.ndarray
     x_error_trace: np.ndarray
@@ -96,6 +100,12 @@ class ScenarioResult:
     position_error_trace: np.ndarray
     yaw_signed_error_trace: np.ndarray
     yaw_abs_error_trace: np.ndarray
+    measurement_x_error_trace: np.ndarray
+    measurement_y_error_trace: np.ndarray
+    measurement_z_error_trace: np.ndarray
+    measurement_yaw_signed_error_trace: np.ndarray
+    measurement_position_error_trace: np.ndarray
+    measurement_yaw_abs_error_trace: np.ndarray
 
 
 def wrap_angle(angle: float) -> float:
@@ -142,9 +152,15 @@ def load_controller_module(controller_path: Path):
 
 
 class HeadlessSmokeSimulator:
-    def __init__(self, controller_module, wind_enabled: bool):
+    def __init__(
+        self,
+        controller_module,
+        wind_enabled: bool,
+        controller_kwargs: dict[str, object] | None = None,
+    ):
         self.controller_module = controller_module
         self.wind_enabled = wind_enabled
+        self.controller_kwargs = controller_kwargs or {}
         self.client_id = p.connect(p.DIRECT)
         if self.client_id < 0:
             raise RuntimeError("Failed to connect to PyBullet in DIRECT mode")
@@ -242,6 +258,7 @@ class HeadlessSmokeSimulator:
                     target,
                     POS_CONTROL_TIMESTEP,
                     self.wind_enabled,
+                    **self.controller_kwargs,
                 )
             )
             self.desired_vel = np.array(controller_output[:3], dtype=float)
@@ -367,8 +384,23 @@ def compute_yaw_overshoot(
     return float(max(overshoot, 0.0))
 
 
-def build_scenarios() -> list[Scenario]:
-    return [Scenario(name=name, target=target) for name, target in SCENARIOS]
+def build_scenarios(
+    seed: int = RANDOM_SEED,
+    target_count: int = TARGET_NO,
+) -> list[Scenario]:
+    rng = random.Random(seed)
+    return [
+        Scenario(
+            name=f"Random Target Test: {index + 1}",
+            target=(
+                rng.uniform(TARGET_MIN, TARGET_MAX),
+                rng.uniform(TARGET_MIN, TARGET_MAX),
+                TARGET_Z,
+                rng.uniform(-math.pi, math.pi),
+            ),
+        )
+        for index in range(target_count)
+    ]
 
 
 def parse_args():
@@ -415,7 +447,6 @@ def parse_args():
     args.controller_name = (
         args.controller_name or args.controller_selector or DEFAULT_CONTROLLER
     )
-    args.controller_path = resolve_controller_path(args.controller_name)
     return args
 
 
@@ -442,13 +473,10 @@ def run_scenario(
 
     peak_position_overshoot = 0.0
     peak_yaw_overshoot = 0.0
-    settling_window_start = None
-    settling_time_s = None
     scenario_start_s = sim.sim_time
 
     while sim.sim_time - scenario_start_s < scenario.timeout_s:
         obs = sim.step(scenario.target)
-        elapsed_s = sim.sim_time - scenario_start_s
 
         position_delta = target_pos - obs.pos
         signed_yaw_error = yaw_error(target_yaw, obs.euler[2])
@@ -473,20 +501,6 @@ def run_scenario(
             compute_yaw_overshoot(start_yaw, target_yaw, obs.euler[2]),
         )
 
-        within_position = position_error <= SETTLE_POSITION_THRESHOLD_M
-        within_yaw = current_yaw_error <= SETTLE_YAW_THRESHOLD_RAD
-
-        # Keep sampling until the scenario timeout so each target gets the same
-        # dwell time, but remember the first time the controller settles.
-        if settling_time_s is None:
-            if within_position and within_yaw:
-                if settling_window_start is None:
-                    settling_window_start = elapsed_s
-                elif elapsed_s - settling_window_start >= SETTLE_HOLD_SECONDS:
-                    settling_time_s = settling_window_start
-            else:
-                settling_window_start = None
-
     position_error_trace = np.array(position_errors)
     yaw_abs_error_trace = np.array(yaw_abs_errors)
 
@@ -494,12 +508,24 @@ def run_scenario(
         raise RuntimeError(f"Scenario {scenario.name} produced no simulation samples")
 
     duration_s = float(timestamps[-1] - scenario_start_s)
-    window_start_s = max(scenario_start_s, timestamps[-1] - METRIC_WINDOW_SECONDS)
     time_trace_s = np.array(timestamps)
-    window_mask = time_trace_s >= window_start_s
+    elapsed_trace_s = time_trace_s - scenario_start_s
+    measurement_mask = elapsed_trace_s >= SETTLING_WINDOW_SECONDS
 
-    window_position_errors = position_error_trace[window_mask]
-    window_yaw_errors = yaw_abs_error_trace[window_mask]
+    x_error_trace = np.array(x_errors)
+    y_error_trace = np.array(y_errors)
+    z_error_trace = np.array(z_errors)
+    yaw_signed_error_trace = np.array(yaw_signed_errors)
+    measurement_position_errors = position_error_trace[measurement_mask]
+    measurement_x_errors = x_error_trace[measurement_mask]
+    measurement_y_errors = y_error_trace[measurement_mask]
+    measurement_z_errors = z_error_trace[measurement_mask]
+    measurement_yaw_signed_errors = yaw_signed_error_trace[measurement_mask]
+    measurement_yaw_errors = yaw_abs_error_trace[measurement_mask]
+    if measurement_position_errors.size == 0:
+        raise RuntimeError(
+            f"Scenario {scenario.name} produced no measurement-window samples"
+        )
 
     return ScenarioResult(
         name=scenario.name,
@@ -507,25 +533,37 @@ def run_scenario(
         start_time_s=scenario_start_s,
         end_time_s=float(timestamps[-1]),
         duration_s=duration_s,
-        settled=settling_time_s is not None,
-        settling_time_s=settling_time_s,
         final_position_error_m=float(position_error_trace[-1]),
         final_yaw_error_rad=float(yaw_abs_error_trace[-1]),
-        mean_position_error_m=float(np.mean(window_position_errors)),
-        mean_yaw_error_rad=float(np.mean(window_yaw_errors)),
-        position_error_variance_m2=float(np.var(window_position_errors)),
-        yaw_error_variance_rad2=float(np.var(window_yaw_errors)),
+        mean_position_error_m=float(np.mean(measurement_position_errors)),
+        mean_yaw_error_rad=float(np.mean(measurement_yaw_errors)),
+        position_error_variance_m2=float(np.var(measurement_position_errors)),
+        yaw_error_variance_rad2=float(np.var(measurement_yaw_signed_errors)),
         peak_position_overshoot_m=peak_position_overshoot,
         peak_yaw_overshoot_rad=peak_yaw_overshoot,
+        mean_abs_x_error_m=float(np.mean(np.abs(measurement_x_errors))),
+        mean_abs_y_error_m=float(np.mean(np.abs(measurement_y_errors))),
+        mean_abs_z_error_m=float(np.mean(np.abs(measurement_z_errors))),
+        mean_abs_yaw_error_rad=float(np.mean(measurement_yaw_errors)),
+        x_error_variance_m2=float(np.var(measurement_x_errors)),
+        y_error_variance_m2=float(np.var(measurement_y_errors)),
+        z_error_variance_m2=float(np.var(measurement_z_errors)),
         sample_count=int(position_error_trace.size),
+        measurement_sample_count=int(measurement_position_errors.size),
         time_trace_s=time_trace_s,
         position_trace=np.vstack(positions),
-        x_error_trace=np.array(x_errors),
-        y_error_trace=np.array(y_errors),
-        z_error_trace=np.array(z_errors),
+        x_error_trace=x_error_trace,
+        y_error_trace=y_error_trace,
+        z_error_trace=z_error_trace,
         position_error_trace=position_error_trace,
-        yaw_signed_error_trace=np.array(yaw_signed_errors),
+        yaw_signed_error_trace=yaw_signed_error_trace,
         yaw_abs_error_trace=yaw_abs_error_trace,
+        measurement_x_error_trace=measurement_x_errors,
+        measurement_y_error_trace=measurement_y_errors,
+        measurement_z_error_trace=measurement_z_errors,
+        measurement_yaw_signed_error_trace=measurement_yaw_signed_errors,
+        measurement_position_error_trace=measurement_position_errors,
+        measurement_yaw_abs_error_trace=measurement_yaw_errors,
     )
 
 
@@ -555,38 +593,185 @@ def aggregate_results(results: list[ScenarioResult]) -> dict[str, float]:
         "avg_peak_yaw_overshoot_rad": float(
             np.mean([result.peak_yaw_overshoot_rad for result in results])
         ),
-        "settled_fraction": float(
-            np.mean([1.0 if result.settled else 0.0 for result in results])
+        "avg_mean_abs_x_error_m": float(
+            np.mean([result.mean_abs_x_error_m for result in results])
+        ),
+        "avg_mean_abs_y_error_m": float(
+            np.mean([result.mean_abs_y_error_m for result in results])
+        ),
+        "avg_mean_abs_z_error_m": float(
+            np.mean([result.mean_abs_z_error_m for result in results])
+        ),
+        "avg_mean_abs_yaw_error_rad": float(
+            np.mean([result.mean_abs_yaw_error_rad for result in results])
+        ),
+        "avg_x_error_variance_m2": float(
+            np.mean([result.x_error_variance_m2 for result in results])
+        ),
+        "avg_y_error_variance_m2": float(
+            np.mean([result.y_error_variance_m2 for result in results])
+        ),
+        "avg_z_error_variance_m2": float(
+            np.mean([result.z_error_variance_m2 for result in results])
         ),
     }
 
-    settled_times = [result.settling_time_s for result in results if result.settled]
-    per_pose_metrics["avg_settling_time_s"] = (
-        float(np.mean(settled_times)) if settled_times else float("nan")
-    )
-
     all_position_errors = np.concatenate(
-        [result.position_error_trace for result in results]
+        [result.measurement_position_error_trace for result in results]
     )
-    all_yaw_errors = np.concatenate([result.yaw_abs_error_trace for result in results])
+    all_yaw_errors = np.concatenate(
+        [result.measurement_yaw_abs_error_trace for result in results]
+    )
+    all_x_errors = np.concatenate([result.measurement_x_error_trace for result in results])
+    all_y_errors = np.concatenate([result.measurement_y_error_trace for result in results])
+    all_z_errors = np.concatenate([result.measurement_z_error_trace for result in results])
+    all_yaw_signed_errors = np.concatenate(
+        [result.measurement_yaw_signed_error_trace for result in results]
+    )
 
-    per_pose_metrics["all_sample_mean_position_error_m"] = float(
+    per_pose_metrics["measurement_sample_mean_position_error_m"] = float(
         np.mean(all_position_errors)
     )
-    per_pose_metrics["all_sample_mean_yaw_error_rad"] = float(np.mean(all_yaw_errors))
-    per_pose_metrics["all_sample_position_error_variance_m2"] = float(
+    per_pose_metrics["measurement_sample_mean_yaw_error_rad"] = float(
+        np.mean(all_yaw_errors)
+    )
+    per_pose_metrics["measurement_sample_position_error_variance_m2"] = float(
         np.var(all_position_errors)
     )
-    per_pose_metrics["all_sample_yaw_error_variance_rad2"] = float(
-        np.var(all_yaw_errors)
+    per_pose_metrics["measurement_sample_yaw_error_variance_rad2"] = float(
+        np.var(all_yaw_signed_errors)
+    )
+    per_pose_metrics["measurement_sample_mean_abs_x_error_m"] = float(
+        np.mean(np.abs(all_x_errors))
+    )
+    per_pose_metrics["measurement_sample_mean_abs_y_error_m"] = float(
+        np.mean(np.abs(all_y_errors))
+    )
+    per_pose_metrics["measurement_sample_mean_abs_z_error_m"] = float(
+        np.mean(np.abs(all_z_errors))
+    )
+    per_pose_metrics["measurement_sample_mean_abs_yaw_error_rad"] = float(
+        np.mean(all_yaw_errors)
+    )
+    per_pose_metrics["measurement_sample_x_error_variance_m2"] = float(
+        np.var(all_x_errors)
+    )
+    per_pose_metrics["measurement_sample_y_error_variance_m2"] = float(
+        np.var(all_y_errors)
+    )
+    per_pose_metrics["measurement_sample_z_error_variance_m2"] = float(
+        np.var(all_z_errors)
     )
     return per_pose_metrics
 
 
-def format_optional(value: float | None, unit: str = "") -> str:
-    if value is None or math.isnan(value):
-        return "n/a"
-    return f"{value:.3f}{unit}"
+def settings_dict() -> dict[str, float | int | bool]:
+    return {
+        "random_seed": RANDOM_SEED,
+        "target_count": TARGET_NO,
+        "target_min": TARGET_MIN,
+        "target_max": TARGET_MAX,
+        "target_z": TARGET_Z,
+        "sim_timestep_s": SIM_TIMESTEP,
+        "position_control_timestep_s": POS_CONTROL_TIMESTEP,
+        "settling_window_s": SETTLING_WINDOW_SECONDS,
+        "measurement_window_s": MEASUREMENT_WINDOW_SECONDS,
+        "scenario_timeout_s": SCENARIO_TIMEOUT_SECONDS,
+    }
+
+
+def scenario_result_to_dict(result: ScenarioResult) -> dict[str, object]:
+    return {
+        "name": result.name,
+        "target": [float(value) for value in result.target],
+        "start_time_s": result.start_time_s,
+        "end_time_s": result.end_time_s,
+        "duration_s": result.duration_s,
+        "final_position_error_m": result.final_position_error_m,
+        "final_yaw_error_rad": result.final_yaw_error_rad,
+        "mean_position_error_m": result.mean_position_error_m,
+        "mean_yaw_error_rad": result.mean_yaw_error_rad,
+        "position_error_variance_m2": result.position_error_variance_m2,
+        "yaw_error_variance_rad2": result.yaw_error_variance_rad2,
+        "peak_position_overshoot_m": result.peak_position_overshoot_m,
+        "peak_yaw_overshoot_rad": result.peak_yaw_overshoot_rad,
+        "mean_abs_x_error_m": result.mean_abs_x_error_m,
+        "mean_abs_y_error_m": result.mean_abs_y_error_m,
+        "mean_abs_z_error_m": result.mean_abs_z_error_m,
+        "mean_abs_yaw_error_rad": result.mean_abs_yaw_error_rad,
+        "x_error_variance_m2": result.x_error_variance_m2,
+        "y_error_variance_m2": result.y_error_variance_m2,
+        "z_error_variance_m2": result.z_error_variance_m2,
+        "sample_count": result.sample_count,
+        "measurement_sample_count": result.measurement_sample_count,
+    }
+
+
+def results_to_dict(
+    controller_name: str,
+    controller_path: Path,
+    wind_enabled: bool,
+    results: list[ScenarioResult],
+) -> dict[str, object]:
+    return {
+        "controller": controller_name,
+        "controller_file": controller_path.name,
+        "wind_enabled": wind_enabled,
+        "settings": settings_dict(),
+        "aggregate": aggregate_results(results),
+        "targets": [scenario_result_to_dict(result) for result in results],
+    }
+
+
+def run_smoke_test_results(
+    controller_name: str = DEFAULT_CONTROLLER,
+    wind_enabled: bool = ENABLE_WIND,
+    controller_module=None,
+    controller_kwargs: dict[str, object] | None = None,
+) -> tuple[str, Path, list[ScenarioResult]]:
+    controller_name = normalize_controller_name(controller_name)
+    controller_path = resolve_controller_path(controller_name)
+    if not controller_path.exists():
+        raise FileNotFoundError(
+            f"Controller '{controller_name}' resolves to missing file: {controller_path}"
+        )
+
+    if controller_module is None:
+        controller_module = load_controller_module(controller_path)
+    scenarios = build_scenarios()
+    simulator = HeadlessSmokeSimulator(
+        controller_module,
+        wind_enabled=wind_enabled,
+        controller_kwargs=controller_kwargs,
+    )
+
+    try:
+        simulator.reset_vehicle()
+        results = [run_scenario(simulator, scenario) for scenario in scenarios]
+    finally:
+        simulator.disconnect()
+
+    return controller_name, controller_path, results
+
+
+def run_smoke_test(
+    controller_name: str = DEFAULT_CONTROLLER,
+    wind_enabled: bool = ENABLE_WIND,
+    controller_module=None,
+    controller_kwargs: dict[str, object] | None = None,
+) -> dict[str, object]:
+    controller_name, controller_path, results = run_smoke_test_results(
+        controller_name=controller_name,
+        wind_enabled=wind_enabled,
+        controller_module=controller_module,
+        controller_kwargs=controller_kwargs,
+    )
+    return results_to_dict(
+        controller_name=controller_name,
+        controller_path=controller_path,
+        wind_enabled=wind_enabled,
+        results=results,
+    )
 
 
 def add_time_annotations(ax, results: list[ScenarioResult], show_labels: bool = False):
@@ -600,10 +785,8 @@ def add_time_annotations(ax, results: list[ScenarioResult], show_labels: bool = 
         )
 
     for result in results:
-        if result.settling_time_s is None:
-            continue
         ax.axvline(
-            result.start_time_s + result.settling_time_s,
+            result.start_time_s + SETTLING_WINDOW_SECONDS,
             color="0.35",
             linewidth=1.0,
             linestyle="--",
@@ -660,28 +843,6 @@ def plot_results(
 
     for axis in (ax_x, ax_y, ax_z, ax_yaw):
         axis.axhline(0.0, color="0.75", linewidth=0.9, zorder=0)
-
-    ax_yaw.axhline(
-        SETTLE_YAW_THRESHOLD_RAD,
-        color="0.45",
-        linewidth=1.0,
-        linestyle=":",
-        alpha=0.8,
-    )
-    ax_yaw.axhline(
-        -SETTLE_YAW_THRESHOLD_RAD,
-        color="0.45",
-        linewidth=1.0,
-        linestyle=":",
-        alpha=0.8,
-    )
-    ax_pos_norm.axhline(
-        SETTLE_POSITION_THRESHOLD_M,
-        color="0.45",
-        linewidth=1.0,
-        linestyle=":",
-        alpha=0.8,
-    )
 
     for color, result in zip(colors, results):
         for axis, _, attribute_name, _ in series_axes:
@@ -754,6 +915,7 @@ def print_report(
     controller_path: Path,
 ):
     aggregate = aggregate_results(results)
+    settings = settings_dict()
 
     print(f"Controller: {controller_path.name}")
     print(f"Wind enabled: {wind_enabled}")
@@ -761,21 +923,20 @@ def print_report(
         "Settings: "
         f"sim_dt={SIM_TIMESTEP:.4f}s "
         f"control_dt={POS_CONTROL_TIMESTEP:.3f}s "
-        f"timeout={SCENARIO_TIMEOUT_SECONDS:.1f}s "
-        f"settle_pos<={SETTLE_POSITION_THRESHOLD_M:.3f}m "
-        f"settle_yaw<={SETTLE_YAW_THRESHOLD_RAD:.3f}rad "
-        f"hold={SETTLE_HOLD_SECONDS:.2f}s"
+        f"seed={settings['random_seed']} "
+        f"targets={settings['target_count']} "
+        f"settle_window={SETTLING_WINDOW_SECONDS:.1f}s "
+        f"measure_window={MEASUREMENT_WINDOW_SECONDS:.1f}s "
+        f"timeout={SCENARIO_TIMEOUT_SECONDS:.1f}s"
     )
     print()
     print("Per-pose results")
     for index, result in enumerate(results, start=1):
         target_x, target_y, target_z, target_yaw = result.target
-        settled_text = "yes" if result.settled else "no"
         print(
-            f"{index}. {result.name:<12} "
+            f"{index}. {result.name:<22} "
             f"target=({target_x:+.2f}, {target_y:+.2f}, {target_z:+.2f}, {target_yaw:+.2f}) "
-            f"duration={result.duration_s:.2f}s settled={settled_text} "
-            f"settling_time={format_optional(result.settling_time_s, 's')}"
+            f"duration={result.duration_s:.2f}s"
         )
         print(
             "   "
@@ -790,7 +951,8 @@ def print_report(
             "   "
             f"peak_pos_overshoot={result.peak_position_overshoot_m:.3f}m "
             f"peak_yaw_overshoot={result.peak_yaw_overshoot_rad:.3f}rad "
-            f"samples={result.sample_count}"
+            f"samples={result.sample_count} "
+            f"measurement_samples={result.measurement_sample_count}"
         )
     print()
     print("Average per pose")
@@ -806,49 +968,32 @@ def print_report(
         f"peak_pos_overshoot={aggregate['avg_peak_position_overshoot_m']:.3f}m "
         f"peak_yaw_overshoot={aggregate['avg_peak_yaw_overshoot_rad']:.3f}rad"
     )
-    print(
-        f"settled_fraction={aggregate['settled_fraction']:.2f} "
-        f"avg_settling_time={format_optional(aggregate['avg_settling_time_s'], 's')}"
-    )
     print()
-    print("All samples across all poses")
+    print("Measurement samples across all poses")
     print(
-        f"mean_pos={aggregate['all_sample_mean_position_error_m']:.3f}m "
-        f"mean_yaw={aggregate['all_sample_mean_yaw_error_rad']:.3f}rad "
-        f"var_pos={aggregate['all_sample_position_error_variance_m2']:.5f} "
-        f"var_yaw={aggregate['all_sample_yaw_error_variance_rad2']:.5f}"
+        f"mean_pos={aggregate['measurement_sample_mean_position_error_m']:.3f}m "
+        f"mean_yaw={aggregate['measurement_sample_mean_yaw_error_rad']:.3f}rad "
+        f"var_pos={aggregate['measurement_sample_position_error_variance_m2']:.5f} "
+        f"var_yaw={aggregate['measurement_sample_yaw_error_variance_rad2']:.5f}"
     )
 
 
 def main():
     args = parse_args()
-    if not args.controller_path.exists():
-        raise FileNotFoundError(
-            f"Controller '{args.controller_name}' resolves to missing file: {args.controller_path}"
-        )
-
-    controller_module = load_controller_module(args.controller_path)
-    scenarios = build_scenarios()
-    simulator = HeadlessSmokeSimulator(
-        controller_module,
+    _, controller_path, results = run_smoke_test_results(
+        controller_name=args.controller_name,
         wind_enabled=args.wind_enabled,
     )
-
-    try:
-        simulator.reset_vehicle()
-        results = [run_scenario(simulator, scenario) for scenario in scenarios]
-    finally:
-        simulator.disconnect()
 
     print_report(
         results,
         wind_enabled=args.wind_enabled,
-        controller_path=args.controller_path,
+        controller_path=controller_path,
     )
     plot_results(
         results,
         wind_enabled=args.wind_enabled,
-        controller_path=args.controller_path,
+        controller_path=controller_path,
     )
 
 
