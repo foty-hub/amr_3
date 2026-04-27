@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import itertools
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,11 +14,46 @@ if str(THIS_DIR) not in sys.path:
 
 import controller_alex_mpc
 
-HORIZON_VALUES = (10, 15, 20)
+HORIZON_VALUES = (5, 10, 15, 20, 25)
 DELTA_REGULARISATION_VALUES = (0.5, 1.0, 2.0)
 CONTROL_REGULARISATION_VALUES = (1.5, 3.0, 6.0)
-VARIANCE_WEIGHT = 0.1
+STD_WEIGHT = 0.1
 DEFAULT_WIND_ENABLED = False
+DEFAULT_CSV_OUTPUT = THIS_DIR / "tune_controller_alex_mpc_results.csv"
+POSITIONAL_MEAN_ERROR_GOAL_M = 0.01
+POSITIONAL_ERROR_STD_GOAL_M = 0.01
+YAW_MEAN_ERROR_GOAL_RAD = 0.01
+YAW_ERROR_STD_GOAL_RAD = 0.001
+ERROR_DIAGNOSTIC_FIELDS = (
+    (
+        "pos",
+        "position",
+        "measurement_sample_mean_position_error_m",
+        "measurement_sample_position_error_variance_m2",
+        "m",
+    ),
+    (
+        "yaw",
+        "yaw",
+        "measurement_sample_mean_yaw_error_rad",
+        "measurement_sample_yaw_error_variance_rad2",
+        "rad",
+    ),
+)
+CSV_AGGREGATE_KEYS = (
+    "avg_final_position_error_m",
+    "avg_final_yaw_error_rad",
+    "avg_mean_position_error_m",
+    "avg_mean_yaw_error_rad",
+    "avg_position_error_variance_m2",
+    "avg_yaw_error_variance_rad2",
+    "avg_peak_position_overshoot_m",
+    "avg_peak_yaw_overshoot_rad",
+    "measurement_sample_mean_position_error_m",
+    "measurement_sample_mean_yaw_error_rad",
+    "measurement_sample_position_error_variance_m2",
+    "measurement_sample_yaw_error_variance_rad2",
+)
 
 
 @dataclass(frozen=True)
@@ -50,21 +87,54 @@ def build_parameter_grid() -> list[TuningCandidate]:
 
 def score_aggregate(
     aggregate: dict[str, float],
-    variance_weight: float = VARIANCE_WEIGHT,
+    std_weight: float = STD_WEIGHT,
 ) -> float:
     mean_error = (
-        aggregate["measurement_sample_mean_abs_x_error_m"]
-        + aggregate["measurement_sample_mean_abs_y_error_m"]
-        + aggregate["measurement_sample_mean_abs_z_error_m"]
-        + aggregate["measurement_sample_mean_abs_yaw_error_rad"]
+        aggregate["measurement_sample_mean_position_error_m"]
+        + aggregate["measurement_sample_mean_yaw_error_rad"]
     )
-    variance_error = (
-        aggregate["measurement_sample_x_error_variance_m2"]
-        + aggregate["measurement_sample_y_error_variance_m2"]
-        + aggregate["measurement_sample_z_error_variance_m2"]
-        + aggregate["measurement_sample_yaw_error_variance_rad2"]
+    std_error = (
+        error_std(aggregate, "measurement_sample_position_error_variance_m2")
+        + error_std(aggregate, "measurement_sample_yaw_error_variance_rad2")
     )
-    return float(mean_error + variance_weight * variance_error)
+    return float(mean_error + std_weight * std_error)
+
+
+def error_std(aggregate: dict[str, float], variance_key: str) -> float:
+    return math.sqrt(max(aggregate[variance_key], 0.0))
+
+
+def format_error_diagnostics(aggregate: dict[str, float]) -> str:
+    return " ".join(
+        f"{display_label}={aggregate[mean_key]:.4f}+/-"
+        f"{error_std(aggregate, variance_key):.4f}{unit}"
+        for display_label, _, mean_key, variance_key, unit in ERROR_DIAGNOSTIC_FIELDS
+    )
+
+
+def error_standard_deviations(aggregate: dict[str, float]) -> dict[str, float]:
+    return {
+        f"measurement_sample_{csv_label}_error_std_{unit}": error_std(
+            aggregate, variance_key
+        )
+        for _, csv_label, _, variance_key, unit in ERROR_DIAGNOSTIC_FIELDS
+    }
+
+
+def meets_error_criteria(aggregate: dict[str, float]) -> bool:
+    return (
+        aggregate["measurement_sample_mean_position_error_m"]
+        < POSITIONAL_MEAN_ERROR_GOAL_M
+        and error_std(aggregate, "measurement_sample_position_error_variance_m2")
+        < POSITIONAL_ERROR_STD_GOAL_M
+        and aggregate["measurement_sample_mean_yaw_error_rad"] < YAW_MEAN_ERROR_GOAL_RAD
+        and error_std(aggregate, "measurement_sample_yaw_error_variance_rad2")
+        < YAW_ERROR_STD_GOAL_RAD
+    )
+
+
+def criteria_marker(aggregate: dict[str, float]) -> str:
+    return "*" if meets_error_criteria(aggregate) else " "
 
 
 def load_smoke_test_module():
@@ -76,7 +146,7 @@ def load_smoke_test_module():
 def run_candidate(
     candidate: TuningCandidate,
     wind_enabled: bool = DEFAULT_WIND_ENABLED,
-    variance_weight: float = VARIANCE_WEIGHT,
+    std_weight: float = STD_WEIGHT,
 ) -> dict[str, object]:
     smoke_test = load_smoke_test_module()
     controller_alex_mpc.configure_controller(
@@ -90,7 +160,7 @@ def run_candidate(
         controller_module=controller_alex_mpc,
         controller_kwargs={"save_data": False},
     )
-    score = score_aggregate(smoke_result["aggregate"], variance_weight)
+    score = score_aggregate(smoke_result["aggregate"], std_weight)
     return {
         "parameters": candidate.to_dict(),
         "score": score,
@@ -101,7 +171,7 @@ def run_candidate(
 
 def run_tuning(
     wind_enabled: bool = DEFAULT_WIND_ENABLED,
-    variance_weight: float = VARIANCE_WEIGHT,
+    std_weight: float = STD_WEIGHT,
     verbose: bool = False,
 ) -> dict[str, object]:
     smoke_test = load_smoke_test_module()
@@ -120,11 +190,15 @@ def run_tuning(
             result = run_candidate(
                 candidate,
                 wind_enabled=wind_enabled,
-                variance_weight=variance_weight,
+                std_weight=std_weight,
             )
             candidate_results.append(result)
             if verbose:
-                print(f"    score={result['score']:.6f}")
+                aggregate = result["aggregate"]
+                print(
+                    f"    [{criteria_marker(aggregate)}] score={result['score']:.6f} "
+                    f"mean_error+/-std: {format_error_diagnostics(aggregate)}"
+                )
     finally:
         controller_alex_mpc.configure_controller()
 
@@ -134,9 +208,15 @@ def run_tuning(
             "horizons": list(HORIZON_VALUES),
             "delta_regularisation_strengths": list(DELTA_REGULARISATION_VALUES),
             "control_regularisation_strengths": list(CONTROL_REGULARISATION_VALUES),
-            "variance_weight": variance_weight,
+            "std_weight": std_weight,
             "candidate_count": len(grid),
             "wind_enabled": wind_enabled,
+            "criteria": {
+                "position_mean_error_goal_m": POSITIONAL_MEAN_ERROR_GOAL_M,
+                "position_error_std_goal_m": POSITIONAL_ERROR_STD_GOAL_M,
+                "yaw_mean_error_goal_rad": YAW_MEAN_ERROR_GOAL_RAD,
+                "yaw_error_std_goal_rad": YAW_ERROR_STD_GOAL_RAD,
+            },
             "smoke_test": smoke_test.settings_dict(),
         },
         "best_candidate": ranking[0],
@@ -160,7 +240,7 @@ def print_summary(tuning_result: dict[str, object], top_n: int):
     print(
         "MPC tuning grid: "
         f"{settings['candidate_count']} candidates, "
-        f"variance_weight={settings['variance_weight']}"
+        f"std_weight={settings['std_weight']}"
     )
     print(
         "Smoke test: "
@@ -170,21 +250,70 @@ def print_summary(tuning_result: dict[str, object], top_n: int):
         f"wind={settings['wind_enabled']}"
     )
     print()
+    print(
+        "* = meets criteria: "
+        f"pos_mean<{POSITIONAL_MEAN_ERROR_GOAL_M:g}m, "
+        f"pos_std<{POSITIONAL_ERROR_STD_GOAL_M:g}m, "
+        f"yaw_mean<{YAW_MEAN_ERROR_GOAL_RAD:g}rad, "
+        f"yaw_std<{YAW_ERROR_STD_GOAL_RAD:g}rad"
+    )
     print(f"Top {min(top_n, len(ranking))} candidates")
     for row in ranking[:top_n]:
         params = row["parameters"]
         aggregate = row["aggregate"]
         print(
-            f"{row['rank']:>2}. score={row['score']:.6f} "
+            f"[{criteria_marker(aggregate)}] {row['rank']:>2}. "
+            f"score={row['score']:.6f} "
             f"horizon={params['horizon']} "
             f"delta_reg={params['delta_regularisation_strength']:.3g} "
             f"control_reg={params['control_regularisation_strength']:.3g} "
-            f"mean_xyz_yaw=("
-            f"{aggregate['measurement_sample_mean_abs_x_error_m']:.3f}, "
-            f"{aggregate['measurement_sample_mean_abs_y_error_m']:.3f}, "
-            f"{aggregate['measurement_sample_mean_abs_z_error_m']:.3f}, "
-            f"{aggregate['measurement_sample_mean_abs_yaw_error_rad']:.3f})"
+            f"mean_error+/-std: {format_error_diagnostics(aggregate)}"
         )
+
+
+def build_csv_rows(tuning_result: dict[str, object]) -> list[dict[str, object]]:
+    settings = tuning_result["settings"]
+    rows = []
+
+    for row in tuning_result["ranking"]:
+        params = row["parameters"]
+        aggregate = row["aggregate"]
+        rows.append(
+            {
+                "rank": row["rank"],
+                "meets_criteria": meets_error_criteria(aggregate),
+                "criteria_marker": criteria_marker(aggregate).strip(),
+                "score": row["score"],
+                "horizon": params["horizon"],
+                "delta_regularisation_strength": params[
+                    "delta_regularisation_strength"
+                ],
+                "control_regularisation_strength": params[
+                    "control_regularisation_strength"
+                ],
+                "std_weight": settings["std_weight"],
+                "wind_enabled": settings["wind_enabled"],
+                **error_standard_deviations(aggregate),
+                **{key: aggregate[key] for key in CSV_AGGREGATE_KEYS},
+            }
+        )
+
+    return rows
+
+
+def write_csv(tuning_result: dict[str, object], output_path: Path) -> Path:
+    rows = build_csv_rows(tuning_result)
+    if not rows:
+        raise ValueError("No tuning results available to write")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(rows[0])
+    with output_path.open("w", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return output_path
 
 
 def parse_args():
@@ -203,10 +332,21 @@ def parse_args():
         help="Number of ranked candidates to print.",
     )
     parser.add_argument(
+        "--std-weight",
         "--variance-weight",
+        dest="std_weight",
         type=float,
-        default=VARIANCE_WEIGHT,
-        help="Weight applied to the variance part of the score.",
+        default=STD_WEIGHT,
+        help=(
+            "Weight applied to the standard deviation part of the score. "
+            "--variance-weight is kept as a deprecated alias."
+        ),
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=DEFAULT_CSV_OUTPUT,
+        help="Path to write ranked tuning results as CSV.",
     )
     return parser.parse_args()
 
@@ -215,11 +355,14 @@ def main():
     args = parse_args()
     tuning_result = run_tuning(
         wind_enabled=args.wind,
-        variance_weight=args.variance_weight,
+        std_weight=args.std_weight,
         verbose=True,
     )
     print()
     print_summary(tuning_result, top_n=args.top)
+    csv_path = write_csv(tuning_result, args.csv)
+    print()
+    print(f"Wrote CSV results to {csv_path}")
 
 
 if __name__ == "__main__":
