@@ -21,8 +21,8 @@ from qpsolvers import solve_qp
 
 # These are the limits placed on the sim - but note that
 # the real-hardware limits are clipped to [-0.3, 0.3]
-POS_CONTROL_LIMIT = 0.5
-YAW_CONTROL_LIMIT = 0.5
+POS_CONTROL_LIMIT = 1.0
+YAW_CONTROL_LIMIT = 1.0
 HORIZON = 10  # How many steps forwards to consider in the MPC optimisation
 DELTA_REGULARISATION_STRENGTH = 0.1
 CONTROL_REGULARISATION_STRENGTH = 3.0
