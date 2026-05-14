@@ -21,7 +21,7 @@ from qpsolvers import solve_qp
 
 # These are the limits placed on the sim - but note that
 # the real-hardware limits are clipped to [-0.3, 0.3]
-POS_CONTROL_LIMIT = 1.0
+POS_CONTROL_LIMIT = 0.2
 YAW_CONTROL_LIMIT = 1.0
 HORIZON = 10  # How many steps forwards to consider in the MPC optimisation
 DELTA_REGULARISATION_STRENGTH = 0.1
@@ -93,7 +93,7 @@ class MPCController:
         self.control_dim = 4
 
         # Set up the base matrices for the system. We assume a simplified state representation without
-        # velocity or inertia considerations. That limits
+        # velocity or inertia considerations. That limits the model to direct position/yaw integration.
         self.A = np.eye(self.state_dim)
         self.C = np.eye(self.state_dim)
         self.M = horizon
@@ -137,7 +137,7 @@ class MPCController:
         self.lb = np.tile(self.control_lb, self.M)
         self.ub = np.tile(self.control_ub, self.M)
 
-        # Initialise the
+        # Initialise the stored control input used by the delta regularisation offset and fallback output.
         self.control = np.zeros(self.control_dim)
 
     def _build_lambda(self) -> np.ndarray:
@@ -282,7 +282,7 @@ def controller(state, target_pos, dt, wind_enabled=False, save_data=True):
     control = mpc_controller(state_trimmed, target, dt)
 
     # We get state and target_pos in the world frame, but the control is in
-    # the drone's local frame. We can ignore pitch and yaw, so rotate the xy
+    # the drone's local frame. We can ignore roll and pitch, so rotate the xy
     # velocities by a 2D rotation matrix to convert to the right frame.
     yaw = state_trimmed[3]
     control[0:2] = get_rot_matrix(yaw) @ control[0:2]
